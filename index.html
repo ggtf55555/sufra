@@ -329,6 +329,9 @@ function screenMsg(html){ el("app").innerHTML=
      <div class="b">سفرة</div><div class="s">نظام الطلبات والمحاسبة</div></div>
    <div class="login-body" style="text-align:center">${html}</div></div></div>`; }
 
+function withTimeout(p,ms){
+  return Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error("انتهت مهلة الاتصال — القاعدة ما ردّت خلال "+(ms/1000)+" ثانية")),ms))]);
+}
 (async function init(){
   screenMsg(`<p class="muted" style="font-size:15px;margin:6px 0">جاري التحميل…</p>`);
   if(!sbReady()){
@@ -339,12 +342,21 @@ function screenMsg(html){ el("app").innerHTML=
       <p class="muted" style="font-size:14px;line-height:1.9;margin:0">افتح ملف <b>index.html</b> وبدّل قيمتي<br><b>SUPABASE_URL</b> و <b>SUPABASE_ANON_KEY</b><br>بقيمك من لوحة Supabase، ثم أعد الرفع.</p>`);
     return;
   }
+  if(!window.supabase || !window.supabase.createClient){
+    screenMsg(`<p style="color:var(--red);font-weight:700;margin:0 0 8px">تعذّر تحميل مكتبة الاتصال</p>
+      <p class="muted" style="font-size:13px;line-height:1.9">مكتبة Supabase ما تحمّلت (قد يكون الإنترنت أو حاجب إعلانات يمنع jsdelivr).</p>
+      <button class="btn" onclick="location.reload()" style="margin-top:14px">إعادة المحاولة</button>`);
+    return;
+  }
   try{ sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY); }
-  catch(e){ screenMsg(`<p style="color:var(--red)">تعذّر تحميل مكتبة الاتصال. تأكد من الإنترنت وأعد المحاولة.</p>`); return; }
-  try{ await loadAll(); }
+  catch(e){ screenMsg(`<p style="color:var(--red)">تعذّر إنشاء الاتصال: ${esc(e&&e.message||String(e))}</p>
+      <button class="btn" onclick="location.reload()" style="margin-top:14px">إعادة المحاولة</button>`); return; }
+  try{ await withTimeout(loadAll(),15000); }
   catch(e){ console.error(e);
+    const msg=(e&&e.message)?e.message:String(e);
     screenMsg(`<p style="color:var(--red);font-weight:700;margin:0 0 8px">تعذّر الاتصال بقاعدة البيانات</p>
-      <p class="muted" style="font-size:14px;line-height:1.9">تأكد من صحة الرابط والمفتاح، وأنك نفّذت أوامر الإعداد (SQL) على Supabase.</p>
+      <p style="font-size:13px;line-height:1.9;color:#b98">السبب: ${esc(msg)}</p>
+      <p class="muted" style="font-size:12px;line-height:1.8">تأكد من الرابط والمفتاح وأنك نفّذت أوامر SQL.</p>
       <button class="btn" onclick="location.reload()" style="margin-top:14px">إعادة المحاولة</button>`);
     return; }
   DB.locks=DB.locks||{}; DB.orders=DB.orders||[]; DB.payments=DB.payments||[];
