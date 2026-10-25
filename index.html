@@ -187,6 +187,34 @@ textarea.input{resize:vertical;min-height:70px}
 .receipt .r-tot .big{font-size:20px;font-weight:800;font-family:"Cairo"}
 .receipt .r-foot{text-align:center;color:#888;font-size:12px;margin-top:20px;border-top:2px dashed #bbb;padding-top:12px}
 
+/* ---------- المالية / الأصناف / السجل ---------- */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px}
+.kpi{background:#fff;border:1px solid var(--line);border-radius:14px;padding:12px 14px}
+.kpi .l{font-size:12px;color:var(--ink-soft);font-weight:600}
+.kpi .v{font-size:20px;font-weight:800;font-family:"Cairo";margin-top:4px}
+.lrow{display:flex;align-items:center;gap:10px;padding:11px 0;border-bottom:1px dashed var(--line)}
+.lrow:last-child{border-bottom:none}
+.lmain{flex:1;min-width:0}
+.lt1{font-size:14px;font-weight:600;line-height:1.7}
+.lt2{font-size:12px;color:var(--ink-soft);margin-top:2px}
+.lnum{text-align:end;flex:none}
+.lact{flex:none}
+.ktag{display:inline-block;font-size:11px;font-weight:700;border-radius:7px;padding:1px 8px;margin-inline-end:8px;background:var(--line-2);color:var(--ink-soft)}
+.ktag.k-order{background:var(--gold-soft);color:var(--gold-deep)}
+.ktag.k-pay{background:var(--green-soft);color:var(--green)}
+.ktag.k-adj{background:#E8EEF8;color:#2D4E86}
+.banner{background:var(--gold-soft);border:1px solid var(--gold);color:#5a4210;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-weight:700;font-size:14px;line-height:1.8}
+.infoline{background:var(--paper);border:1px dashed var(--line);border-radius:10px;padding:9px 12px;font-size:13px;color:var(--ink-soft)}
+.back{background:transparent;border:none;color:var(--ink-soft);font-weight:700;font-size:14px;padding:4px 0 12px}
+.cattabs{display:flex;gap:8px;overflow-x:auto;padding:4px 0 12px;position:sticky;top:56px;z-index:20;background:var(--paper);-webkit-overflow-scrolling:touch}
+.cat{white-space:nowrap;background:#fff;border:1.5px solid var(--line);color:var(--ink);padding:9px 16px;border-radius:999px;font-size:14px;font-weight:700;flex:none}
+.cat.on{background:var(--pine);color:#fff;border-color:var(--pine)}
+.cat .cb{display:inline-block;min-width:18px;text-align:center;background:var(--green);color:#fff;border-radius:999px;font-size:11px;padding:1px 6px;margin-inline-start:6px}
+.cathead{font-family:"Cairo";font-weight:800;font-size:15px;color:var(--pine);margin:6px 0 10px}
+.catsec{margin-bottom:18px}
+.catsec.hide{display:none}
+@media print{ .receipt{page-break-after:always;break-after:page} .receipt:last-child{page-break-after:auto;break-after:auto} }
+
 @media print{
   body *{visibility:hidden}
   #printRoot,#printRoot *{visibility:visible}
@@ -215,29 +243,103 @@ let sb=null;
 function sbReady(){ return sb && !SUPABASE_URL.startsWith("ضع_") && !SUPABASE_ANON_KEY.startsWith("ضع_"); }
 
 /* ---- تحويل بين شكل قاعدة البيانات وشكل التطبيق ---- */
+function tsOf(r){ return Date.parse(r.created_at)||0; }
 function orderFromDb(r){ return {id:r.id,personId:r.person_id,date:r.date,items:r.items||[],
-  manual:r.manual||0,manualNote:r.manual_note||"",note:r.note||"",total:r.total||0}; }
+  manual:r.manual||0,manualNote:r.manual_note||"",note:r.note||"",total:r.total||0,ts:tsOf(r)}; }
 function orderToDb(o){ return {id:o.id,person_id:o.personId,date:o.date,items:o.items||[],
   manual:o.manual||0,manual_note:o.manualNote||"",note:o.note||"",total:o.total||0}; }
+function payFromDb(r){ return {id:r.id,personId:r.person_id,amount:r.amount||0,date:r.date,note:r.note||"",ts:tsOf(r)}; }
+function personToDb(p){ const o={id:p.id,name:p.name,pin:p.pin||""}; if(DB&&DB.schemaOk) o.opening_balance=p.opening||0; return o; }
+function menuToDb(m){ const o={id:m.id,num:m.num,name:m.name,price:m.price}; if(DB&&DB.schemaOk) o.category=m.category||""; return o; }
+
+/* قراءة جدول كامل على دفعات — Supabase يرجّع بحد أقصى 1000 صف بالطلب الواحد،
+   وبدون هذا التقسيم تطلع الأرصدة ناقصة بصمت لمّا تكبر البيانات */
+async function fetchAll(table){
+  const out=[]; const step=1000;
+  for(let from=0;;from+=step){
+    const {data,error}=await sb.from(table).select('*').order('id').range(from,from+step-1);
+    if(error) return {data:null,error};
+    out.push(...data);
+    if(data.length<step) break;
+  }
+  return {data:out,error:null};
+}
+
+/* أمر ترقية قاعدة البيانات (نفس ملف supabase_upgrade.sql) */
+const UPGRADE_SQL = `-- =========================================================
+--  سفرة — ترقية قاعدة البيانات (الإدارة المالية + أصناف المنيو)
+--  الصق هذا كامل في: Supabase > SQL Editor > New query > Run
+--  آمن للتشغيل أكثر من مرة، ولا يمسح أي بيانات موجودة.
+-- =========================================================
+
+-- 1) رصيد سابق لكل شخص (موجب = عليه، سالب = له)
+alter table people add column if not exists opening_balance int default 0;
+
+-- 2) صنف الوجبة (لتبويبات المنيو)
+alter table menu add column if not exists category text default '';
+
+-- 3) تسويات الحساب: خصم أو إضافة (المبلغ موجب = يزيد عليه، سالب = خصم)
+create table if not exists adjustments (
+  id text primary key,
+  person_id text references people(id) on delete cascade,
+  amount int not null,
+  date date not null,
+  note text default '',
+  created_at timestamptz default now()
+);
+
+-- 4) سجل التغييرات (من عدّل أو حذف ماذا ومتى)
+create table if not exists audit_log (
+  id text primary key,
+  ts timestamptz default now(),
+  actor text default 'admin',
+  action text,
+  person_id text,
+  details text default ''
+);
+
+-- 5) الحماية + السماح للتطبيق بالقراءة والكتابة
+alter table adjustments enable row level security;
+alter table audit_log   enable row level security;
+drop policy if exists app_adjustments on adjustments;
+drop policy if exists app_audit       on audit_log;
+create policy app_adjustments on adjustments for all using (true) with check (true);
+create policy app_audit       on audit_log   for all using (true) with check (true);
+
+-- 6) تصنيف مبدئي للوجبات (تقدر تغيّره من تبويب المنيو بعدين)
+update menu set category='لحوم'            where id in ('m1','m2','m3','m5','m9')              and coalesce(category,'')='';
+update menu set category='أطباق على التمن' where id in ('m4','m6','m10','m11','m18','m20')     and coalesce(category,'')='';
+update menu set category='دجاج'            where id in ('m12','m16','m17')                      and coalesce(category,'')='';
+update menu set category='إضافات'          where id in ('m7','m8','m13','m19')                  and coalesce(category,'')='';
+update menu set category='مشروبات'         where id in ('m14','m15')                            and coalesce(category,'')='';
+
+-- تم ✓
+`;
 
 /* ---- تحميل كل البيانات ---- */
 async function loadAll(){
-  const [pe,me,or,pa,se]=await Promise.all([
+  const [pe,me,or,pa,se,ad,au]=await Promise.all([
     sb.from('people').select('*'),
     sb.from('menu').select('*'),
-    sb.from('orders').select('*'),
-    sb.from('payments').select('*'),
-    sb.from('settings').select('*').eq('id',1).maybeSingle()
+    fetchAll('orders'),
+    fetchAll('payments'),
+    sb.from('settings').select('*').eq('id',1).maybeSingle(),
+    fetchAll('adjustments'),
+    sb.from('audit_log').select('*').order('ts',{ascending:false}).limit(300)
   ]);
   const err=pe.error||me.error||or.error||pa.error||se.error;
   if(err) throw err;
+  const schemaOk=!ad.error && !au.error;   // false = ملف الترقية لم يُشغَّل بعد
   DB={
-    people:(pe.data||[]).map(r=>({id:r.id,name:r.name,pin:r.pin||""})),
-    menu:(me.data||[]).sort((a,b)=>(a.num||0)-(b.num||0)).map(r=>({id:r.id,num:r.num,name:r.name,price:r.price})),
+    people:(pe.data||[]).map(r=>({id:r.id,name:r.name,pin:r.pin||"",opening:r.opening_balance||0})),
+    menu:(me.data||[]).sort((a,b)=>(a.num||0)-(b.num||0)).map(r=>({id:r.id,num:r.num,name:r.name,price:r.price,category:r.category||""})),
     orders:(or.data||[]).map(orderFromDb),
-    payments:(pa.data||[]).map(r=>({id:r.id,personId:r.person_id,amount:r.amount,date:r.date,note:r.note||""})),
+    payments:(pa.data||[]).map(payFromDb),
+    adjustments:schemaOk?(ad.data||[]).map(payFromDb):[],
+    audit:schemaOk?(au.data||[]).map(r=>({id:r.id,ts:Date.parse(r.ts)||0,actor:r.actor||"admin",action:r.action||"",personId:r.person_id,details:r.details||""})):[],
     admin:{pin:(se.data&&se.data.admin_pin)||"1234"},
-    locks:(se.data&&se.data.locks)||{}
+    locks:(se.data&&se.data.locks)||{},
+    schemaOk
   };
 }
 
@@ -246,13 +348,31 @@ async function apiAddOrder(o){ const {error}=await sb.from('orders').insert(orde
 async function apiUpdateOrder(o){ const {error}=await sb.from('orders').update(orderToDb(o)).eq('id',o.id); if(error)throw error; }
 async function apiDeleteOrder(id){ const {error}=await sb.from('orders').delete().eq('id',id); if(error)throw error; }
 async function apiAddPayment(p){ const {error}=await sb.from('payments').insert({id:p.id,person_id:p.personId,amount:p.amount,date:p.date,note:p.note||""}); if(error)throw error; }
-async function apiAddPerson(p){ const {error}=await sb.from('people').insert({id:p.id,name:p.name,pin:p.pin||""}); if(error)throw error; }
-async function apiUpdatePerson(p){ const {error}=await sb.from('people').update({name:p.name,pin:p.pin||""}).eq('id',p.id); if(error)throw error; }
+async function apiUpdatePayment(p){ const {error}=await sb.from('payments').update({person_id:p.personId,amount:p.amount,date:p.date,note:p.note||""}).eq('id',p.id); if(error)throw error; }
+async function apiDeletePayment(id){ const {error}=await sb.from('payments').delete().eq('id',id); if(error)throw error; }
+async function apiAddAdj(a){ const {error}=await sb.from('adjustments').insert({id:a.id,person_id:a.personId,amount:a.amount,date:a.date,note:a.note||""}); if(error)throw error; }
+async function apiUpdateAdj(a){ const {error}=await sb.from('adjustments').update({amount:a.amount,date:a.date,note:a.note||""}).eq('id',a.id); if(error)throw error; }
+async function apiDeleteAdj(id){ const {error}=await sb.from('adjustments').delete().eq('id',id); if(error)throw error; }
+async function apiAddPerson(p){ const {error}=await sb.from('people').insert(personToDb(p)); if(error)throw error; }
+async function apiUpdatePerson(p){ const o=personToDb(p); delete o.id; const {error}=await sb.from('people').update(o).eq('id',p.id); if(error)throw error; }
 async function apiDeletePerson(id){ const {error}=await sb.from('people').delete().eq('id',id); if(error)throw error; }
-async function apiAddMenu(m){ const {error}=await sb.from('menu').insert({id:m.id,num:m.num,name:m.name,price:m.price}); if(error)throw error; }
-async function apiUpdateMenu(m){ const {error}=await sb.from('menu').update({num:m.num,name:m.name,price:m.price}).eq('id',m.id); if(error)throw error; }
+async function apiAddMenu(m){ const {error}=await sb.from('menu').insert(menuToDb(m)); if(error)throw error; }
+async function apiUpdateMenu(m){ const o=menuToDb(m); delete o.id; const {error}=await sb.from('menu').update(o).eq('id',m.id); if(error)throw error; }
 async function apiDeleteMenu(id){ const {error}=await sb.from('menu').delete().eq('id',id); if(error)throw error; }
 async function apiSaveSettings(){ const {error}=await sb.from('settings').upsert({id:1,admin_pin:DB.admin.pin,locks:DB.locks}); if(error)throw error; }
+/* قراءة إعدادات القفل فقط (تُستدعى قبل أي تعديل من الموظف حتى يكون القفل محدّث) */
+async function refreshLocks(){ try{ const {data}=await sb.from('settings').select('locks').eq('id',1).maybeSingle(); if(data) DB.locks=data.locks||{}; }catch(e){} }
+
+/* ---- سجل التغييرات: يُكتب بصمت ولا يعطّل العملية الأساسية ---- */
+function audit(action,personId,details,actor){
+  const e={id:uid(),ts:Date.now(),actor:actor||"الإدارة",action,personId:personId||null,details:details||""};
+  if(DB) DB.audit.unshift(e);
+  if(DB&&DB.schemaOk){
+    sb.from('audit_log').insert({id:e.id,ts:new Date(e.ts).toISOString(),actor:e.actor,action:e.action,person_id:e.personId,details:e.details})
+      .then(r=>{ if(r&&r.error) console.warn("audit",r.error); });
+  }
+}
+
 
 /* منفّذ آمن: ينفّذ العملية ويطلّع رسالة إذا صار خطأ */
 async function run(fn,okMsg){
@@ -298,11 +418,108 @@ function orderTotal(o){ const it=(o.items||[]).reduce((s,i)=>s+i.price*i.qty,0);
 function inRange(d,from,to){ return (!from||d>=from)&&(!to||d<=to); }
 function personOrders(id,from,to){ return DB.orders.filter(o=>o.personId===id&&inRange(o.date,from,to)); }
 function personPayments(id,from,to){ return DB.payments.filter(p=>p.personId===id&&inRange(p.date,from,to)); }
-function balance(id){ // all-time
-  const t=DB.orders.filter(o=>o.personId===id).reduce((s,o)=>s+orderTotal(o),0);
-  const p=DB.payments.filter(x=>x.personId===id).reduce((s,x)=>s+x.amount,0);
-  return t-p;
+/* قراءة رقم من حقل: يقبل الأرقام العربية والفارسية والفواصل (٥٠٠٠ أو 5,000) */
+function toInt(v){
+  v=String(v==null?"":v)
+    .replace(/[٠-٩]/g,d=>"٠١٢٣٤٥٦٧٨٩".indexOf(d))
+    .replace(/[۰-۹]/g,d=>"۰۱۲۳۴۵۶۷۸۹".indexOf(d))
+    .replace(/[,٬،\s]/g,"").replace(/[−–]/g,"-");
+  const n=parseInt(v,10); return isNaN(n)?0:n;
 }
+function pname(id){ return (person(id)||{}).name||"—"; }
+function fmtTime(ts){ const d=new Date(ts), p=x=>String(x).padStart(2,"0");
+  return d.getFullYear()+"/"+p(d.getMonth()+1)+"/"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes()); }
+function monthRange(offset){ const d=new Date(); d.setDate(1); d.setMonth(d.getMonth()+offset);
+  const y=d.getFullYear(), m=d.getMonth(), p=x=>String(x).padStart(2,"0"), last=new Date(y,m+1,0).getDate();
+  return [y+"-"+p(m+1)+"-01", y+"-"+p(m+1)+"-"+p(last)]; }
+function monthStartStr(){ return todayStr().slice(0,8)+"01"; }
+
+/* ============ دفتر الحساب (الأساس لكل الأرصدة) ============
+   كل حركة لها مبلغ بإشارة:  موجب = يزيد عليه  |  سالب = ينقص عنه
+   رصيد سابق (+) · طلب (+) · إضافة (+) · خصم (−) · دفعة (−)
+   الرصيد = مجموع كل الحركات.  موجب = عليه، سالب = له (دفع زيادة). */
+const KIND_RANK={open:0,order:1,adj:2,pay:3};
+function ledgerEntries(id){
+  const p=person(id), out=[];
+  if(p && p.opening) out.push({kind:"open",id:"open",date:"0000-00-00",amount:p.opening,ts:0});
+  DB.orders.filter(o=>o.personId===id).forEach(o=>out.push({kind:"order",id:o.id,date:o.date,amount:orderTotal(o),ref:o,ts:o.ts||0}));
+  (DB.adjustments||[]).filter(a=>a.personId===id).forEach(a=>out.push({kind:"adj",id:a.id,date:a.date,amount:a.amount,ref:a,ts:a.ts||0}));
+  DB.payments.filter(x=>x.personId===id).forEach(x=>out.push({kind:"pay",id:x.id,date:x.date,amount:-x.amount,ref:x,ts:x.ts||0}));
+  out.sort((a,b)=>a.date.localeCompare(b.date)||KIND_RANK[a.kind]-KIND_RANK[b.kind]||a.ts-b.ts);
+  return out;
+}
+/* الرصيد (كل الأيام، أو حتى تاريخ معيّن) */
+function balance(id,upTo){
+  return ledgerEntries(id).filter(e=>!upTo||e.date<=upTo).reduce((s,e)=>s+e.amount,0);
+}
+/* كشف فترة: رصيد سابق ← حركات الفترة (برصيد متراكم) ← رصيد ختامي */
+function statement(id,from,to){
+  const all=ledgerEntries(id);
+  const inr=all.filter(e=>(!from||e.date>=from)&&(!to||e.date<=to));
+  const prev=(from?all.filter(e=>e.date<from):[]).reduce((s,e)=>s+e.amount,0)
+            +inr.filter(e=>e.kind==="open").reduce((s,e)=>s+e.amount,0);
+  let run=prev;
+  const entries=inr.filter(e=>e.kind!=="open").map(e=>{ run+=e.amount; return {...e,run}; });
+  const sum=k=>entries.filter(e=>e.kind===k).reduce((s,e)=>s+e.amount,0);
+  return {prev,entries,orders:sum("order"),adj:sum("adj"),pay:-sum("pay"),closing:run};
+}
+function entryLabel(e){
+  if(e.kind==="open") return "رصيد سابق (قبل استخدام النظام)";
+  if(e.kind==="prev") return esc(e.label||"رصيد سابق");
+  if(e.kind==="order"){ const o=e.ref;
+    const items=(o.items||[]).map(i=>esc(i.name)+(i.qty>1?" ×"+i.qty:"")).join("، ");
+    const man=o.manual?(items?" + ":"")+"مبلغ يدوي"+(o.manualNote?" ("+esc(o.manualNote)+")":""):"";
+    return (items+man)||"طلب"; }
+  if(e.kind==="pay") return "دفعة"+(e.ref.note?" — "+esc(e.ref.note):"");
+  if(e.kind==="adj") return (e.ref.amount<0?"خصم":"إضافة")+(e.ref.note?" — "+esc(e.ref.note):"");
+  return "";
+}
+function ledgerRows(entries,admin){
+  return entries.map(e=>{
+    const tag={open:"سابق",prev:"سابق",order:"طلب",pay:"دفعة",adj:(e.amount<0?"خصم":"إضافة")}[e.kind];
+    const editable=admin && e.kind!=="prev";
+    return `<div class="lrow">
+      <div class="lmain"><div class="lt1"><span class="ktag k-${e.kind==="prev"?"open":e.kind}">${tag}</span>${entryLabel(e)}</div>
+        <div class="lt2">${e.date&&e.date!=="0000-00-00"?dispDate(e.date):""}</div></div>
+      <div class="lnum"><div class="num ${e.amount<0?"clear":""}" style="font-weight:800">${e.amount<0?"−":"+"}${fmt(Math.abs(e.amount))}</div>
+        <div class="lt2 num">الرصيد <span class="${e.run>0?"owed":"clear"}">${fmt(e.run)}</span></div></div>
+      ${editable?`<div class="lact"><button class="btn line sm" data-ledit="${e.kind}:${e.id}">تعديل</button></div>`:""}
+    </div>`;
+  }).join("");
+}
+function summaryCells(st){
+  const c=(l,v,cls)=>`<div class="kpi"><div class="l">${l}</div><div class="v num ${cls||""}">${fmt(v)}</div></div>`;
+  return `<div class="kpis">${c("رصيد سابق",st.prev)}${c("طلبات الفترة",st.orders)}${st.adj?c("تسويات (خصم/إضافة)",st.adj):""}${c("مدفوع",st.pay,"clear")}${c("الرصيد الختامي",st.closing,st.closing>0?"owed":"clear")}</div>`;
+}
+
+/* ============ القفل ============
+   الطلب يُقفل عن الموظف إذا: قفلته الإدارة يدويًا، أو صار يومه ماضي، أو عدّى وقت القفل التلقائي (اختياري) */
+function cutoffTime(){ return (DB.locks&&DB.locks._cutoff)||""; }
+function isLocked(date){
+  if(DB.locks && DB.locks[date]===true) return true;
+  const today=todayStr();
+  if(date<today) return true;
+  const c=cutoffTime();
+  if(c && date===today){ const n=new Date(), t=String(n.getHours()).padStart(2,"0")+":"+String(n.getMinutes()).padStart(2,"0"); if(t>=c) return true; }
+  return false;
+}
+function lockReason(date){
+  if(DB.locks && DB.locks[date]===true) return "الإدارة قفلت طلبات هذا اليوم";
+  if(date<todayStr()) return "هذا الطلب من يوم سابق";
+  return "انتهى وقت الطلب لهذا اليوم";
+}
+
+/* ============ أصناف المنيو ============ */
+const NO_CAT="أخرى";
+function itemCat(m){ return (m.category||"").trim()||NO_CAT; }
+function menuCategories(){
+  const order=[]; DB.menu.forEach(m=>{ const c=itemCat(m); if(!order.includes(c)) order.push(c); });
+  return order.filter(c=>c!==NO_CAT).concat(order.includes(NO_CAT)?[NO_CAT]:[]);
+}
+function menuOptionsHTML(selected){
+  return menuCategories().map(c=>`<optgroup label="${esc(c)}">${DB.menu.filter(m=>itemCat(m)===c).map(m=>`<option value="${m.id}">${esc(m.name)} — ${fmt(m.price)}</option>`).join("")}</optgroup>`).join("");
+}
+
 function toast(msg){ const t=el("toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"),1900); }
 
 /* ============ Modal ============ */
@@ -436,21 +653,22 @@ function topbar(){
 }
 function renderApp(){
   const app=el("app");
-  if(S.role==="admin") app.innerHTML=topbar()+adminTabs()+`<div class="wrap" id="view"></div>`;
+  if(S.role==="admin") app.innerHTML=topbar()+adminTabs()+(DB.schemaOk?"":`<div class="wrap" style="padding-bottom:0">${upgradeBannerHTML()}</div>`)+`<div class="wrap" id="view"></div>`;
   else app.innerHTML=topbar()+custTabs()+`<div class="wrap" id="view"></div>`;
   el("logoutBtn").onclick=renderLogin;
   el("refreshBtn").onclick=async()=>{ el("refreshBtn").textContent="…"; await refresh(); renderApp(); toast("تم التحديث"); };
   bindTabs();
+  if(S.role==='admin') bindUpgradeBanner();
   renderView();
 }
 
 /* ---- tabs ---- */
 function adminTabs(){
-  const t=[["today","طلبات اليوم"],["accounts","الحسابات"],["report","كشف حساب"],["menu","المنيو"],["people","الأشخاص"],["settings","الإعدادات"]];
+  const t=[["today","طلبات اليوم"],["accounts","الحسابات"],["report","كشف حساب"],["menu","المنيو"],["people","الأشخاص"],["audit","السجل"],["settings","الإعدادات"]];
   const todayCount=DB.orders.filter(o=>o.date===todayStr()).length;
   return `<div class="tabs">`+t.map(([k,l])=>{
     const b = (k==="today"&&todayCount)?`<span class="badge">${todayCount}</span>`:"";
-    return `<button class="tab ${S.view===k?'active':''}" data-tab="${k}">${l}${b}</button>`;}).join("")+`</div>`;
+    return `<button class="tab ${(S.view===k||(k==="accounts"&&S.view==="ledger"))?'active':''}" data-tab="${k}">${l}${b}</button>`;}).join("")+`</div>`;
 }
 function custTabs(){
   const t=[["order","اطلب اليوم"],["me","حسابي"]];
@@ -460,7 +678,7 @@ function bindTabs(){ document.querySelectorAll("[data-tab]").forEach(b=>b.onclic
 
 function renderView(){
   if(S.role==="admin"){
-    ({today:viewToday,accounts:viewAccounts,report:viewReport,menu:viewMenu,people:viewPeople,settings:viewSettings,order:()=>viewOrder(true)}[S.view]||viewToday)();
+    ({today:viewToday,accounts:viewAccounts,ledger:viewLedger,report:viewReport,menu:viewMenu,people:viewPeople,audit:viewAudit,settings:viewSettings,order:()=>viewOrder(true)}[S.view]||viewToday)();
   }else{
     ({order:viewOrder,me:viewMe}[S.view]||viewOrder)();
   }
@@ -469,29 +687,95 @@ function renderView(){
 /* ============================================================
    ORDER SCREEN (customer + admin "طلب لشخص")
 ============================================================ */
-function viewOrder(forAdmin){
+function orderInfoHTML(){
+  const c=cutoffTime();
+  const todayLocked=isLocked(todayStr());
+  if(todayLocked) return `<div class="banner" style="background:var(--red-soft);border-color:#e3b8b1">🔒 طلبات اليوم مقفلة. تقدر تطلب ليوم قادم من خانة التاريخ.</div>`;
+  return `<div class="infoline">${c?`⏰ آخر وقت للطلب والتعديل اليوم: <b class="num">${esc(c)}</b>`:"✏️ تقدر تعدّل أو تحذف طلبك قبل ما تقفل الإدارة الطلبات"}</div>`;
+}
+
+/* بطاقة طلبات الموظف القابلة للتعديل (لم تُقفل بعد) */
+function myOrdersCardHTML(){
+  const mine=DB.orders.filter(o=>o.personId===S.personId && !isLocked(o.date)).sort((a,b)=>a.date.localeCompare(b.date)||(a.ts-b.ts));
+  if(!mine.length) return "";
+  return `<div class="card card-p myorders" style="margin-bottom:14px">
+    <div class="section-title"><span class="k"></span>طلباتك المرسلة <span class="muted" style="font-weight:500;font-size:12px">— تقدر تعدّلها قبل القفل</span></div>
+    ${mine.map(o=>`<div class="dline">
+       <span style="flex:1;min-width:0"><span class="nm">${entryLabel({kind:"order",ref:o})}</span>
+         <div class="lt" style="margin-top:2px">${dispDate(o.date)}${o.note?" · 📝 "+esc(o.note):""}</div></span>
+       <span class="lt num" style="font-weight:700">${money(orderTotal(o))}</span>
+       <button class="btn line sm" data-myedit="${o.id}">تعديل</button>
+       <button class="btn danger sm" data-mydel="${o.id}">حذف</button>
+     </div>`).join("")}
+  </div>`;
+}
+function bindMyOrders(){
+  document.querySelectorAll("[data-myedit]").forEach(b=>b.onclick=()=>customerEditOrder(b.dataset.myedit));
+  document.querySelectorAll("[data-mydel]").forEach(b=>b.onclick=()=>customerDeleteOrder(b.dataset.mydel));
+}
+async function refreshOrder(oid){
+  try{
+    const {data,error}=await sb.from('orders').select('*').eq('id',oid).maybeSingle();
+    if(error) return null;
+    const i=DB.orders.findIndex(x=>x.id===oid);
+    if(!data){ if(i>=0) DB.orders.splice(i,1); return null; }
+    const o=orderFromDb(data); if(i>=0) DB.orders[i]=o; else DB.orders.push(o); return o;
+  }catch(e){ return null; }
+}
+async function customerEditOrder(oid){
+  await refreshLocks();
+  const o=await refreshOrder(oid);
+  if(!o||o.personId!==S.personId){ toast("الطلب غير موجود (ربما حذفته الإدارة)"); renderView(); return; }
+  if(isLocked(o.date)){ toast("ما تقدر تعدّل — "+lockReason(o.date)); renderView(); return; }
+  orderEditModal(oid,true);
+}
+async function customerDeleteOrder(oid){
+  await refreshLocks();
+  const o=await refreshOrder(oid);
+  if(!o||o.personId!==S.personId){ toast("الطلب غير موجود"); renderView(); return; }
+  if(isLocked(o.date)){ toast("ما تقدر تحذف — "+lockReason(o.date)); renderView(); return; }
+  confirmDo("حذف طلبك؟",async()=>{
+    await refreshLocks();
+    if(isLocked(o.date)){ toast("ما تقدر تحذف — "+lockReason(o.date)); renderView(); return; }
+    const ok=await run(()=>apiDeleteOrder(oid),"تم حذف الطلب"); if(!ok)return;
+    DB.orders=DB.orders.filter(x=>x.id!==oid);
+    audit("حذف طلب (من الموظف)",o.personId,`${pname(o.personId)} · ${dispDate(o.date)} · ${fmt(orderTotal(o))}`,pname(o.personId));
+    renderView();
+  });
+}
+
+function viewOrder(){
   const v=el("view");
   const isAdmin = S.role==="admin";
-  S.draft={}; S.note="";
-  const orderingFor = isAdmin ? null : S.personId;
+  S.draft={}; S.note=""; S.cat="*"; S._saving=false;
+  const cats=menuCategories();
   const peopleChips = isAdmin
     ? `<div style="margin-bottom:16px"><label class="fld">الطلب لِـ</label>
         <div class="chips" id="pchips">${DB.people.map(p=>`<button class="chip" data-p="${p.id}">${esc(p.name)}</button>`).join("")}
         <button class="chip add" id="addPersonChip">＋ شخص</button></div></div>`
     : "";
+  const card=m=>`<button class="mcard" data-add="${m.id}" data-nm="${esc(m.name)}">
+        <span class="qbadge hide" data-q="${m.id}">0</span>
+        <span class="nm">${esc(m.name)}</span><span class="pr">${money(m.price)}</span></button>`;
 
   v.innerHTML=`
+   ${isAdmin?"":orderInfoHTML()}
+   ${isAdmin?"":myOrdersCardHTML()}
    ${peopleChips}
-   <div class="card card-p" style="margin-bottom:14px">
+   <div class="card card-p" style="margin-bottom:12px">
      <div class="row">
-       <div><label class="fld">التاريخ</label><input class="input" type="date" id="ordDate" value="${todayStr()}"></div>
+       <div><label class="fld">التاريخ</label><input class="input" type="date" id="ordDate" value="${todayStr()}" ${isAdmin?"":`min="${todayStr()}"`}></div>
        <div><label class="fld">بحث بالمنيو</label><input class="input" id="menuSearch" placeholder="اكتب اسم الوجبة..."></div>
      </div>
    </div>
-   <div class="menu-grid" id="menuGrid">
-     ${DB.menu.map(m=>`<button class="mcard" data-add="${m.id}" data-nm="${esc(m.name)}">
-        <span class="no">${m.num}</span><span class="qbadge hide" data-q="${m.id}">0</span>
-        <span class="nm">${esc(m.name)}</span><span class="pr">${money(m.price)}</span></button>`).join("")}
+   <div class="cattabs" id="catTabs">
+     <button class="cat on" data-cat="*">الكل</button>
+     ${cats.map(c=>`<button class="cat" data-cat="${esc(c)}">${esc(c)}<span class="cb hide" data-cb="${esc(c)}">0</span></button>`).join("")}
+   </div>
+   <div id="menuSecs">
+     ${cats.map(c=>`<div class="catsec" data-sec="${esc(c)}"><div class="cathead">${esc(c)}</div>
+        <div class="menu-grid">${DB.menu.filter(m=>itemCat(m)===c).map(card).join("")}</div></div>`).join("")}
+     ${DB.menu.length?"":`<div class="empty">المنيو فارغ — أضف وجبات من تبويب المنيو</div>`}
    </div>
 
    <div class="card card-p" style="margin-top:16px">
@@ -515,13 +799,9 @@ function viewOrder(forAdmin){
   bar.classList.remove("hide");
 
   // events
-  el("menuGrid").addEventListener("click",e=>{ const b=e.target.closest("[data-add]"); if(!b)return; addDraft(b.dataset.add); });
-  el("menuSearch").addEventListener("input",e=>{
-    const q=e.target.value.trim();
-    document.querySelectorAll("#menuGrid .mcard").forEach(c=>{
-      c.classList.toggle("hide", q && !c.dataset.nm.includes(q));
-    });
-  });
+  el("menuSecs").addEventListener("click",e=>{ const b=e.target.closest("[data-add]"); if(!b)return; addDraft(b.dataset.add); });
+  el("catTabs").addEventListener("click",e=>{ const b=e.target.closest("[data-cat]"); if(!b)return; S.cat=b.dataset.cat; el("menuSearch").value=""; applyMenuFilter(); });
+  el("menuSearch").addEventListener("input",applyMenuFilter);
   el("ordNote").addEventListener("input",e=>S.note=e.target.value);
   if(isAdmin){
     el("manAmt").addEventListener("input",updateTotal);
@@ -530,9 +810,22 @@ function viewOrder(forAdmin){
       c.classList.add("on"); S._forPerson=c.dataset.p;
     });
     el("addPersonChip").onclick=()=>personModal();
-  }
+    if(S._forPerson){ const c=document.querySelector('#pchips .chip[data-p="'+S._forPerson+'"]'); if(c) c.classList.add("on"); }
+  } else bindMyOrders();
   el("saveOrder").onclick=()=>saveOrder(isAdmin);
   updateDraftPanel();
+}
+
+/* فلترة المنيو: الصنف المختار + البحث (البحث يشمل كل الأصناف) */
+function applyMenuFilter(){
+  const q=(el("menuSearch").value||"").trim();
+  const cat=q?"*":(S.cat||"*");
+  document.querySelectorAll("#menuSecs .catsec").forEach(sec=>{
+    let any=false;
+    sec.querySelectorAll(".mcard").forEach(c=>{ const show=!q||c.dataset.nm.includes(q); c.classList.toggle("hide",!show); if(show)any=true; });
+    sec.classList.toggle("hide",!((cat==="*"||cat===sec.dataset.sec)&&any));
+  });
+  document.querySelectorAll("#catTabs .cat").forEach(b=>b.classList.toggle("on",b.dataset.cat===(q?"*":(S.cat||"*"))));
 }
 
 function draftEntries(){ return Object.values(S.draft).filter(d=>d.qty>0); }
@@ -557,40 +850,51 @@ function updateDraftPanel(){
     : `<div class="empty">اضغط على الوجبات لإضافتها</div>`;
   host.querySelectorAll("[data-inc]").forEach(b=>b.onclick=()=>setQty(b.dataset.inc,S.draft[b.dataset.inc].qty+1));
   host.querySelectorAll("[data-dec]").forEach(b=>b.onclick=()=>setQty(b.dataset.dec,S.draft[b.dataset.dec].qty-1));
-  // qty badges on menu cards
-  document.querySelectorAll("#menuGrid .qbadge").forEach(b=>{
+  // عدّاد على كل وجبة وعلى كل تبويب صنف
+  document.querySelectorAll("#menuSecs .qbadge").forEach(b=>{
     const q=(S.draft[b.dataset.q]||{}).qty||0;
     b.textContent=q; b.classList.toggle("hide",q===0);
   });
+  const counts={};
+  ents.forEach(d=>{ const m=DB.menu.find(x=>x.id===d.id); const c=m?itemCat(m):NO_CAT; counts[c]=(counts[c]||0)+d.qty; });
+  document.querySelectorAll("#catTabs [data-cb]").forEach(b=>{ const n=counts[b.dataset.cb]||0; b.textContent=n; b.classList.toggle("hide",n===0); });
   updateTotal();
 }
 function updateTotal(){
   let t=draftItemsTotal();
-  const ma=el("manAmt"); if(ma) t+=parseInt(ma.value||"0",10)||0;
+  const ma=el("manAmt"); if(ma) t+=toInt(ma.value);
   const box=el("ordTotal"); if(box) box.textContent=money(t);
 }
 
 async function saveOrder(isAdmin){
+  if(S._saving) return;                      // يمنع الإرسال المزدوج بالضغط المكرر
   const pid = isAdmin ? S._forPerson : S.personId;
   if(isAdmin && !pid){ toast("اختر الشخص أول"); return; }
   const date=el("ordDate").value||todayStr();
   const items=draftEntries().map(d=>({name:d.name,price:d.price,qty:d.qty}));
-  const manual = isAdmin ? (parseInt((el("manAmt")||{}).value||"0",10)||0) : 0;
+  const manual = isAdmin ? toInt((el("manAmt")||{}).value) : 0;
   const manualNote = isAdmin ? ((el("manNote")||{}).value||"") : "";
   if(items.length===0 && manual===0){ toast("طلبك فارغ"); return; }
-  if(DB.locks[date] && !isAdmin){ toast("طلبات هذا اليوم مقفلة، راجع الإدارة"); return; }
-  const o={ id:uid(), personId:pid, date, items, manual, manualNote,
-            note:(el("ordNote")||{}).value||"" };
-  o.total=orderTotal(o);
-  const ok=await run(()=>apiAddOrder(o)); if(!ok) return;
-  DB.orders.push(o);
-  toast("تم إرسال الطلب ✓");
-  if(isAdmin){ S.draft={};
-    if(el("manAmt")) el("manAmt").value=""; if(el("manNote")) el("manNote").value="";
-    if(el("ordNote")) el("ordNote").value=""; updateDraftPanel();
-  } else {
-    S.view="me"; renderApp();
-  }
+  S._saving=true; const btn=el("saveOrder"); if(btn) btn.disabled=true;
+  try{
+    if(!isAdmin){
+      await refreshLocks();
+      if(isLocked(date)){ toast("ما تقدر تطلب — "+lockReason(date)); return; }
+    }
+    const o={ id:uid(), personId:pid, date, items, manual, manualNote,
+              note:(el("ordNote")||{}).value||"" };
+    o.total=orderTotal(o);
+    const ok=await run(()=>apiAddOrder(o)); if(!ok) return;
+    o.ts=Date.now(); DB.orders.push(o);
+    if(isAdmin) audit("إضافة طلب",pid,`${pname(pid)} · ${dispDate(date)} · ${fmt(o.total)}`);
+    toast(isAdmin?"تم إرسال الطلب ✓":"تم إرسال الطلب ✓ — تقدر تعدّله قبل القفل");
+    if(isAdmin){ S.draft={};
+      if(el("manAmt")) el("manAmt").value=""; if(el("manNote")) el("manNote").value="";
+      if(el("ordNote")) el("ordNote").value=""; updateDraftPanel();
+    } else {
+      S.view="me"; renderApp();
+    }
+  } finally { S._saving=false; const b2=el("saveOrder"); if(b2) b2.disabled=false; }
 }
 
 /* ============================================================
@@ -598,40 +902,28 @@ async function saveOrder(isAdmin){
 ============================================================ */
 function viewMe(){
   hideBar();
-  const v=el("view"); const id=S.personId;
+  const v=el("view"); const id=S.personId; const p=person(id);
   const bal=balance(id);
-  const orders=personOrders(id).sort((a,b)=>b.ts-a.ts);
-  const pays=personPayments(id).sort((a,b)=>b.ts-a.ts);
+  const st=statement(id,"","");
+  const list=st.entries.slice().reverse();
+  if(p.opening) list.push({kind:"open",id:"open",amount:p.opening,run:p.opening,date:""});
+  const totalOrders=DB.orders.filter(o=>o.personId===id).reduce((s,o)=>s+orderTotal(o),0);
   v.innerHTML=`
    <div class="card card-p" style="margin-bottom:14px;display:flex;align-items:center;gap:14px">
      <div class="prow" style="border:none;padding:0;flex:1">
-       <div class="av">${esc(initials(person(id).name))}</div>
-       <div><div class="nm">${esc(person(id).name)}</div><div class="sub">إجمالي طلباتك: ${money(orders.reduce((s,o)=>s+orderTotal(o),0))}</div></div>
+       <div class="av">${esc(initials(p.name))}</div>
+       <div><div class="nm">${esc(p.name)}</div><div class="sub">إجمالي طلباتك: ${money(totalOrders)}</div></div>
      </div>
-     <div style="text-align:end"><div class="muted" style="font-size:12px">المتبقي عليك</div>
-       <div class="num ${bal>0?'owed':'clear'}" style="font-size:26px;font-weight:800;font-family:Cairo">${money(bal)}</div></div>
+     <div style="text-align:end"><div class="muted" style="font-size:12px">${bal<0?"رصيد لك":"المتبقي عليك"}</div>
+       <div class="num ${bal>0?'owed':'clear'}" style="font-size:26px;font-weight:800;font-family:Cairo">${money(Math.abs(bal))}</div></div>
    </div>
-   <div class="card card-p" style="margin-bottom:14px">
-     <div class="section-title"><span class="k"></span>طلباتك</div>
-     ${orders.length? orders.map(o=>orderRow(o,false)).join("") : `<div class="empty">لا توجد طلبات بعد</div>`}
-   </div>
-   ${pays.length?`<div class="card card-p">
-     <div class="section-title"><span class="k"></span>دفعاتك</div>
-     ${pays.map(p=>`<div class="dline"><span class="nm">دفعة</span><span class="lt">${dispDate(p.date)}</span><span class="lt num clear">${money(p.amount)}</span></div>`).join("")}
-   </div>`:""}`;
-}
-function orderRow(o,admin){
-  const items=(o.items||[]).map(i=>`${esc(i.name)}${i.qty>1?" ×"+i.qty:""}`).join("، ");
-  const man=o.manual?`${items?"، ":""}مبلغ يدوي (${esc(o.manualNote||"—")})`:"";
-  return `<div class="dline">
-     <span style="flex:1">
-       <span class="nm">${items||man||"—"}</span>
-       ${o.note?`<div class="lt" style="margin-top:2px">📝 ${esc(o.note)}</div>`:""}
-       <div class="lt" style="margin-top:2px">${dispDate(o.date)}</div>
-     </span>
-     <span class="lt num" style="font-weight:700">${money(orderTotal(o))}</span>
-     ${admin?`<button class="btn danger sm" data-delo="${o.id}">حذف</button>`:""}
+   ${orderInfoHTML()}
+   ${myOrdersCardHTML()}
+   <div class="card card-p">
+     <div class="section-title"><span class="k"></span>كشف حسابك</div>
+     ${list.length? ledgerRows(list,false) : `<div class="empty">لا توجد حركات بعد</div>`}
    </div>`;
+  bindMyOrders();
 }
 
 /* ============================================================
@@ -647,7 +939,7 @@ function viewToday(){
   orders.forEach(o=>{ (o.items||[]).forEach(i=>{ agg[i.name]=(agg[i.name]||0)+i.qty; itemsCount+=i.qty; });
     grand+=orderTotal(o); });
   const aggArr=Object.entries(agg).sort((a,b)=>b[1]-a[1]);
-  const locked=!!DB.locks[d];
+  const manualLock=DB.locks[d]===true, locked=isLocked(d), autoLock=locked&&!manualLock;
 
   // restaurant text
   let rtext=`طلبات ${dispDate(d)}:\n`;
@@ -660,7 +952,7 @@ function viewToday(){
        <label class="fld" style="margin:0">اليوم:</label>
        <input class="input" type="date" id="digDate" value="${d}">
        <button class="btn line sm" id="digToday">اليوم</button>
-       <button class="btn ${locked?'danger':'line'} sm" id="lockBtn">${locked?"مقفل ✓":"قفل الطلب"}</button>
+       <button class="btn ${locked?'danger':'line'} sm" id="lockBtn" ${autoLock?"disabled":""}>${manualLock?"مقفل ✓ (اضغط للفتح)":(autoLock?"مقفل تلقائياً":"قفل الطلب")}</button>
      </div>
    </div>
 
@@ -698,8 +990,8 @@ function viewToday(){
 
   el("digDate").onchange=e=>{ digestDate=e.target.value; viewToday(); };
   el("digToday").onclick=()=>{ digestDate=todayStr(); viewToday(); };
-  el("lockBtn").onclick=async()=>{ if(locked) delete DB.locks[d]; else DB.locks[d]=true;
-    await run(()=>apiSaveSettings()); viewToday(); };
+  el("lockBtn").onclick=async()=>{ if(manualLock) delete DB.locks[d]; else DB.locks[d]=true;
+    await run(()=>apiSaveSettings()); audit(manualLock?"فتح الطلبات":"قفل الطلبات",null,dispDate(d)); viewToday(); };
   el("copyR").onclick=()=>copyText(rtext);
   bindDeleteOrder();
 }
@@ -710,50 +1002,65 @@ function copyText(t){
   function selectRText(){ const ta=el("rtext"); if(ta){ta.focus();ta.select();} toast("حدد النص وانسخه"); }
 }
 function bindDeleteOrder(){
-  document.querySelectorAll("[data-delo]").forEach(b=>b.onclick=()=>{
-    confirmDo("حذف هذا الطلب؟",async()=>{ const id=b.dataset.delo;
-      const ok=await run(()=>apiDeleteOrder(id),"تم الحذف"); if(!ok)return;
-      DB.orders=DB.orders.filter(o=>o.id!==id); renderView(); });
-  });
+  document.querySelectorAll("[data-delo]").forEach(b=>b.onclick=()=>deleteOrderAdmin(b.dataset.delo));
   document.querySelectorAll("[data-edito]").forEach(b=>b.onclick=()=>orderEditModal(b.dataset.edito));
 }
-
-/* ---- order editor (admin) ---- */
-let oeDraft=null;
-function orderEditModal(oid){
+function deleteOrderAdmin(oid){
   const o=DB.orders.find(x=>x.id===oid); if(!o)return;
-  oeDraft={ id:o.id, personId:o.personId,
+  confirmDo(`حذف طلب ${pname(o.personId)} بتاريخ ${dispDate(o.date)} (${money(orderTotal(o))})؟`,async()=>{
+    const ok=await run(()=>apiDeleteOrder(oid),"تم الحذف"); if(!ok)return;
+    DB.orders=DB.orders.filter(x=>x.id!==oid);
+    audit("حذف طلب",o.personId,`${pname(o.personId)} · ${dispDate(o.date)} · ${fmt(orderTotal(o))} · ${(o.items||[]).map(i=>i.name+(i.qty>1?" ×"+i.qty:"")).join("، ")}`);
+    renderView();
+  });
+}
+
+/* ---- محرّر الطلب (الإدارة: كل شي — الموظف: الوجبات والملاحظة فقط) ---- */
+let oeDraft=null;
+function orderEditModal(oid,byCustomer){
+  const o=DB.orders.find(x=>x.id===oid); if(!o)return;
+  oeDraft={ id:o.id, byCustomer:!!byCustomer,
     items:(o.items||[]).map(i=>({name:i.name,price:i.price,qty:i.qty})),
     manual:o.manual||0, manualNote:o.manualNote||"", note:o.note||"" };
-  const opts=DB.menu.map(m=>`<option value="${m.id}">${esc(m.name)} — ${fmt(m.price)}</option>`).join("");
-  openModal("تعديل طلب — "+esc(person(o.personId)?.name||""),
+  const popts=DB.people.map(p=>`<option value="${p.id}" ${p.id===o.personId?"selected":""}>${esc(p.name)}</option>`).join("");
+  openModal(byCustomer?"تعديل طلبك":"تعديل طلب — "+esc(pname(o.personId)),
    `<div class="stack">
+      ${byCustomer?`<div class="infoline">${dispDate(o.date)}${cutoffTime()?` · آخر وقت للتعديل <b class="num">${esc(cutoffTime())}</b>`:" · التعديل متاح حتى تقفل الإدارة الطلبات"}</div>`
+      :`<div class="row">
+          <div><label class="fld">الشخص</label><select class="input" id="oePerson">${popts}</select></div>
+          <div><label class="fld">التاريخ</label><input class="input" type="date" id="oeDate" value="${o.date}"></div>
+        </div>`}
       <div id="oeItems"></div>
       <div class="row" style="align-items:flex-end">
-        <div style="flex:2"><label class="fld">أضف وجبة</label><select class="input" id="oeSel">${opts}</select></div>
+        <div style="flex:2"><label class="fld">أضف وجبة</label><select class="input" id="oeSel">${menuOptionsHTML()}</select></div>
         <button class="btn sm" id="oeAdd" type="button" style="flex:none">＋ أضف</button>
       </div>
-      <div class="row">
-        <div><label class="fld">مبلغ يدوي</label><input class="input num" id="oeManual" inputmode="numeric" value="${oeDraft.manual||''}"></div>
-        <div><label class="fld">وصف اليدوي</label><input class="input" id="oeManualNote" value="${esc(oeDraft.manualNote)}"></div>
-      </div>
+      ${byCustomer?(oeDraft.manual?`<div class="infoline">يوجد مبلغ إضافي من الإدارة: <b class="num">${money(oeDraft.manual)}</b>${oeDraft.manualNote?" ("+esc(oeDraft.manualNote)+")":""}</div>`:"")
+      :`<div class="row">
+          <div><label class="fld">مبلغ يدوي</label><input class="input num" id="oeManual" inputmode="numeric" value="${oeDraft.manual||''}"></div>
+          <div><label class="fld">وصف اليدوي</label><input class="input" id="oeManualNote" value="${esc(oeDraft.manualNote)}"></div>
+        </div>`}
       <div><label class="fld">ملاحظة للمطعم</label><input class="input" id="oeNote" value="${esc(oeDraft.note)}"></div>
       <div style="display:flex;align-items:center;gap:12px;border-top:1px dashed var(--line);padding-top:12px">
         <div class="muted" style="font-size:13px">الإجمالي</div>
         <div class="num" id="oeTotal" style="font-size:20px;font-weight:800;font-family:Cairo">0 د.ع</div>
         <button class="btn" id="oeSave" style="margin-inline-start:auto">حفظ التعديل</button>
       </div>
+      ${byCustomer?"":`<button class="btn danger block" id="oeDel" type="button">حذف الطلب</button>`}
     </div>`);
   oeRenderItems();
   el("oeAdd").onclick=()=>{ const m=DB.menu.find(x=>x.id===el("oeSel").value); if(!m)return;
     const ex=oeDraft.items.find(i=>i.name===m.name&&i.price===m.price);
     if(ex) ex.qty++; else oeDraft.items.push({name:m.name,price:m.price,qty:1});
     oeRenderItems(); };
-  el("oeManual").addEventListener("input",oeUpdateTotal);
+  if(!byCustomer){
+    el("oeManual").addEventListener("input",oeUpdateTotal);
+    el("oeDel").onclick=()=>deleteOrderAdmin(oid);
+  }
   el("oeSave").onclick=oeSave;
 }
 function oeItemsTotal(){ return oeDraft.items.reduce((s,i)=>s+i.price*i.qty,0); }
-function oeUpdateTotal(){ let t=oeItemsTotal(); const m=el("oeManual"); if(m)t+=parseInt(m.value||"0",10)||0;
+function oeUpdateTotal(){ let t=oeItemsTotal(); const m=el("oeManual"); t+=m?toInt(m.value):(oeDraft.manual||0);
   const b=el("oeTotal"); if(b)b.textContent=money(t); }
 function oeRenderItems(){
   const host=el("oeItems"); if(!host)return;
@@ -761,223 +1068,398 @@ function oeRenderItems(){
     <div class="dline"><span class="nm">${esc(d.name)}</span>
       <span class="stepper"><button data-oedec="${idx}">−</button><span class="num">${d.qty}</span><button data-oeinc="${idx}">＋</button></span>
       <span class="lt num">${money(d.price*d.qty)}</span></div>`).join("")
-    : `<div class="empty">لا وجبات — أضف من الأسفل أو استخدم مبلغ يدوي</div>`;
+    : `<div class="empty">لا وجبات — أضف من الأسفل</div>`;
   host.querySelectorAll("[data-oeinc]").forEach(b=>b.onclick=()=>{ oeDraft.items[+b.dataset.oeinc].qty++; oeRenderItems(); });
   host.querySelectorAll("[data-oedec]").forEach(b=>b.onclick=()=>{ const i=+b.dataset.oedec;
     oeDraft.items[i].qty--; if(oeDraft.items[i].qty<=0) oeDraft.items.splice(i,1); oeRenderItems(); });
   oeUpdateTotal();
 }
 async function oeSave(){
-  const m=el("oeManual"); oeDraft.manual=parseInt((m&&m.value)||"0",10)||0;
-  oeDraft.manualNote=(el("oeManualNote").value||""); oeDraft.note=(el("oeNote").value||"");
-  if(oeDraft.items.length===0 && oeDraft.manual===0){ toast("الطلب صار فارغ — استخدم زر حذف إذا تريد شيله"); return; }
-  const o=DB.orders.find(x=>x.id===oeDraft.id); if(!o){ closeModal(); return; }
+  const cust=oeDraft.byCustomer;
+  let o=DB.orders.find(x=>x.id===oeDraft.id); if(!o){ closeModal(); return; }
+  if(cust){
+    await refreshLocks();
+    o=await refreshOrder(oeDraft.id);               // آخر نسخة من القاعدة (ربما عدّلتها الإدارة)
+    if(!o||o.personId!==S.personId){ toast("الطلب غير موجود"); closeModal(); renderView(); return; }
+    if(isLocked(o.date)){ toast("ما تقدر تعدّل — "+lockReason(o.date)); closeModal(); renderView(); return; }
+  }else{
+    oeDraft.manual=toInt((el("oeManual")||{}).value);
+    oeDraft.manualNote=(el("oeManualNote").value||"");
+  }
+  oeDraft.note=(el("oeNote").value||"");
+  const manual=cust?(o.manual||0):oeDraft.manual;
+  if(oeDraft.items.length===0 && manual===0){ toast(cust?"الطلب صار فارغ — استخدم زر حذف إذا تريد تلغيه":"الطلب صار فارغ — استخدم زر حذف الطلب"); return; }
+  const before=orderTotal(o);
   const upd={...o, items:oeDraft.items.map(i=>({name:i.name,price:i.price,qty:i.qty})),
-    manual:oeDraft.manual, manualNote:oeDraft.manualNote, note:oeDraft.note};
+    manual, manualNote:cust?o.manualNote:oeDraft.manualNote, note:oeDraft.note};
+  if(!cust){ upd.personId=el("oePerson").value||o.personId; upd.date=el("oeDate").value||o.date; }
   upd.total=orderTotal(upd);
+  const moved=(upd.personId!==o.personId?` · نُقل من ${pname(o.personId)}`:"")+(upd.date!==o.date?` · التاريخ ${dispDate(o.date)} ← ${dispDate(upd.date)}`:"");
+  const details=`${pname(upd.personId)} · ${dispDate(upd.date)} · ${fmt(before)} ← ${fmt(upd.total)}${moved}`;
   const ok=await run(()=>apiUpdateOrder(upd),"تم حفظ التعديل ✓"); if(!ok) return;
   Object.assign(o,upd);
+  if(!DB.orders.includes(o)){ const i=DB.orders.findIndex(x=>x.id===o.id); if(i>=0) DB.orders[i]=o; }
+  audit(cust?"تعديل طلب (من الموظف)":"تعديل طلب",upd.personId,details,cust?pname(upd.personId):undefined);
   closeModal(); renderView();
 }
 
 /* ============================================================
-   ADMIN — الحسابات (balances + payments)
+   ADMIN — الحسابات
 ============================================================ */
+function balLabel(bal){ return bal>0?"متبقي":(bal<0?"رصيد له":"مسدّد"); }
 function viewAccounts(){
   hideBar();
-  const v=el("view");
+  const v=el("view"); const ms=monthStartStr();
   const rows=DB.people.map(p=>({p,bal:balance(p.id)})).sort((a,b)=>b.bal-a.bal);
-  const totalOwed=rows.reduce((s,r)=>s+Math.max(0,r.bal),0);
+  const owed=rows.reduce((s,r)=>s+Math.max(0,r.bal),0);
+  const credit=rows.reduce((s,r)=>s+Math.max(0,-r.bal),0);
+  const mSales=DB.orders.filter(o=>o.date>=ms).reduce((s,o)=>s+orderTotal(o),0);
+  const mPaid=DB.payments.filter(x=>x.date>=ms).reduce((s,x)=>s+x.amount,0);
   v.innerHTML=`
-   <div class="card card-p" style="margin-bottom:14px;display:flex;align-items:center;gap:12px">
-     <div><div class="muted" style="font-size:13px">مجموع المتبقي على الكل</div>
-       <div class="num owed" style="font-size:26px;font-weight:800;font-family:Cairo">${money(totalOwed)}</div></div>
+   <div class="kpis">
+     <div class="kpi"><div class="l">المتبقي على الجميع</div><div class="v num owed">${money(owed)}</div></div>
+     <div class="kpi"><div class="l">مبيعات هذا الشهر</div><div class="v num">${money(mSales)}</div></div>
+     <div class="kpi"><div class="l">مقبوض هذا الشهر</div><div class="v num clear">${money(mPaid)}</div></div>
+     ${credit?`<div class="kpi"><div class="l">أرصدة دائنة (دفعوا زيادة)</div><div class="v num">${money(credit)}</div></div>`:""}
    </div>
    <div class="plist">
      ${rows.map(({p,bal})=>`
        <div class="prow">
-         <div class="av">${esc(initials(p.name))}</div>
-         <div><div class="nm">${esc(p.name)}</div>
-           <div class="sub">${personOrders(p.id).length} طلب · دفع ${money(personPayments(p.id).reduce((s,x)=>s+x.amount,0))}</div></div>
-         <div class="bal"><div class="v num ${bal>0?'owed':'clear'}">${money(bal)}</div>
-           <span class="pill ${bal>0?'owed':'clear'}">${bal>0?'متبقي':'مسدّد'}</span></div>
+         <div class="av" data-open="${p.id}" style="cursor:pointer">${esc(initials(p.name))}</div>
+         <div data-open="${p.id}" style="cursor:pointer;flex:1;min-width:0"><div class="nm">${esc(p.name)}</div>
+           <div class="sub">${personOrders(p.id).length} طلب · مدفوع ${money(personPayments(p.id).reduce((s,x)=>s+x.amount,0))}</div></div>
+         <div class="bal"><div class="v num ${bal>0?'owed':'clear'}">${money(Math.abs(bal))}</div>
+           <span class="pill ${bal>0?'owed':'clear'}">${balLabel(bal)}</span></div>
          <div style="display:flex;flex-direction:column;gap:6px;margin-inline-start:8px">
            <button class="btn sm" data-pay="${p.id}">دفعة</button>
-           <button class="btn line sm" data-stmt="${p.id}">كشف</button>
+           <button class="btn line sm" data-open="${p.id}">الحساب</button>
          </div>
        </div>`).join("")}
    </div>`;
   document.querySelectorAll("[data-pay]").forEach(b=>b.onclick=()=>paymentModal(b.dataset.pay));
-  document.querySelectorAll("[data-stmt]").forEach(b=>b.onclick=()=>{ S._stmtPerson=b.dataset.stmt; S.view="report"; renderApp(); });
+  document.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>openLedger(b.dataset.open));
+}
+function openLedger(pid){ S.acctPerson=pid; S.lfFrom=""; S.lfTo=""; S.view="ledger"; renderApp(); }
+
+/* ---------- دفتر حساب شخص (كل حركة قابلة للتعديل/الحذف) ---------- */
+function viewLedger(){
+  hideBar();
+  const v=el("view"); const id=S.acctPerson; const p=person(id);
+  if(!p){ S.view="accounts"; renderApp(); return; }
+  const from=S.lfFrom||"", to=S.lfTo||"";
+  const st=statement(id,from,to); const bal=balance(id);
+  const list=st.entries.slice().reverse();
+  if(from){ if(st.prev) list.push({kind:"prev",id:"prev",label:"رصيد قبل "+dispDate(from),amount:st.prev,run:st.prev,date:""}); }
+  else if(p.opening) list.push({kind:"open",id:"open",amount:p.opening,run:p.opening,date:""});
+  v.innerHTML=`
+   <button class="back" id="lgBack">→ رجوع للحسابات</button>
+   <div class="card card-p" style="margin-bottom:14px">
+     <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+       <div class="prow" style="border:none;padding:0;flex:1;min-width:180px">
+         <div class="av">${esc(initials(p.name))}</div>
+         <div><div class="nm">${esc(p.name)}</div><div class="sub">${personOrders(id).length} طلب</div></div></div>
+       <div style="text-align:end"><div class="muted" style="font-size:12px">${bal<0?"رصيد له":"المتبقي عليه"}</div>
+         <div class="num ${bal>0?'owed':'clear'}" style="font-size:26px;font-weight:800;font-family:Cairo">${money(Math.abs(bal))}</div></div>
+     </div>
+     <div class="row" style="margin-top:14px">
+       <button class="btn sm" id="lgPay">＋ دفعة</button>
+       <button class="btn line sm" id="lgAdj">＋ خصم / إضافة</button>
+       <button class="btn line sm" id="lgOrd">＋ طلب</button>
+       <button class="btn line sm" id="lgOpen">رصيد سابق</button>
+       <button class="btn dark sm" id="lgPrint">طباعة كشف</button>
+     </div>
+   </div>
+   <div class="card card-p" style="margin-bottom:14px">
+     <div class="row">
+       <div><label class="fld">من تاريخ</label><input class="input" type="date" id="lfFrom" value="${from}"></div>
+       <div><label class="fld">إلى تاريخ</label><input class="input" type="date" id="lfTo" value="${to}"></div>
+       <div style="display:flex;align-items:flex-end"><button class="btn line sm block" id="lfAll">كل الفترة</button></div>
+     </div>
+   </div>
+   <div class="card card-p">
+     <div class="section-title"><span class="k"></span>حركات الحساب (الأحدث أولاً)</div>
+     ${list.length? ledgerRows(list,true) : `<div class="empty">لا توجد حركات بهذه الفترة</div>`}
+   </div>
+   <div style="height:12px"></div>
+   ${summaryCells(st)}`;
+  el("lgBack").onclick=()=>{ S.view="accounts"; renderApp(); };
+  el("lgPay").onclick=()=>paymentModal(id);
+  el("lgAdj").onclick=()=>adjModal(id);
+  el("lgOrd").onclick=()=>{ S._forPerson=id; S.view="order"; renderApp(); };
+  el("lgOpen").onclick=()=>personModal(id);
+  el("lgPrint").onclick=()=>{ el("printRoot").innerHTML=personReceipt(p,from,to); window.print(); };
+  el("lfFrom").onchange=e=>{ S.lfFrom=e.target.value; viewLedger(); };
+  el("lfTo").onchange=e=>{ S.lfTo=e.target.value; viewLedger(); };
+  el("lfAll").onclick=()=>{ S.lfFrom=""; S.lfTo=""; viewLedger(); };
+  document.querySelectorAll("[data-ledit]").forEach(b=>b.onclick=()=>{
+    const [k,eid]=b.dataset.ledit.split(":");
+    if(k==="order") orderEditModal(eid,false);
+    else if(k==="pay") paymentModal(id,eid);
+    else if(k==="adj") adjModal(id,eid);
+    else if(k==="open") personModal(id);
+  });
 }
 
-function paymentModal(pid){
+/* ---------- دفعة: إضافة / تعديل / حذف ---------- */
+function paymentModal(pid,editId){
   const p=person(pid); const bal=balance(pid);
-  openModal("تسجيل دفعة — "+p.name,
+  const ex=editId?DB.payments.find(x=>x.id===editId):null;
+  openModal((ex?"تعديل دفعة — ":"تسجيل دفعة — ")+p.name,
    `<div class="stack">
      <div class="card card-p" style="box-shadow:none;background:var(--paper)">
-       <span class="muted" style="font-size:13px">المتبقي حالياً</span>
-       <div class="num ${bal>0?'owed':'clear'}" style="font-size:22px;font-weight:800;font-family:Cairo">${money(bal)}</div>
+       <span class="muted" style="font-size:13px">${bal<0?"رصيد له حالياً":"المتبقي حالياً"}</span>
+       <div class="num ${bal>0?'owed':'clear'}" style="font-size:22px;font-weight:800;font-family:Cairo">${money(Math.abs(bal))}</div>
      </div>
-     <div><label class="fld">المبلغ المدفوع</label><input class="input num" id="payAmt" inputmode="numeric" placeholder="0"></div>
-     <div class="row">
-       <button class="btn line sm" id="payFull" type="button">دفع الكل (${fmt(Math.max(0,bal))})</button>
-     </div>
-     <div><label class="fld">التاريخ</label><input class="input" type="date" id="payDate" value="${todayStr()}"></div>
-     <div><label class="fld">ملاحظة (اختياري)</label><input class="input" id="payNote"></div>
-     <button class="btn block" id="paySave">حفظ الدفعة</button>
+     <div><label class="fld">المبلغ المدفوع</label><input class="input num" id="payAmt" inputmode="numeric" placeholder="0" value="${ex?ex.amount:""}"></div>
+     <div id="payHint" class="muted" style="font-size:12px;margin-top:-6px"></div>
+     ${ex?"":`<div class="row"><button class="btn line sm" id="payFull" type="button">دفع الكل (${fmt(Math.max(0,bal))})</button></div>`}
+     <div><label class="fld">التاريخ</label><input class="input" type="date" id="payDate" value="${ex?ex.date:todayStr()}"></div>
+     <div><label class="fld">ملاحظة (اختياري)</label><input class="input" id="payNote" value="${ex?esc(ex.note):""}"></div>
+     <button class="btn block" id="paySave">${ex?"حفظ التعديل":"حفظ الدفعة"}</button>
+     ${ex?`<button class="btn danger block" id="payDel" type="button">حذف الدفعة</button>`:""}
    </div>`);
-  el("payFull").onclick=()=>{ el("payAmt").value=Math.max(0,bal); };
+  const hint=()=>{ const a=toInt(el("payAmt").value); const after=bal-(ex?-0:0)-(ex?0:a)+(ex?ex.amount-a:0);
+    el("payHint").textContent = a>0 ? (after<0?`⚠️ المبلغ أكبر من المتبقي — يصير له رصيد ${fmt(-after)}`:`الباقي بعد الدفعة: ${fmt(after)}`) : ""; };
+  el("payAmt").addEventListener("input",hint); hint();
+  if(!ex) el("payFull").onclick=()=>{ el("payAmt").value=Math.max(0,bal); hint(); };
   el("paySave").onclick=async()=>{
-    const amt=parseInt(el("payAmt").value||"0",10)||0;
-    if(amt<=0){ toast("أدخل مبلغ"); return; }
-    const p={id:uid(),personId:pid,amount:amt,date:el("payDate").value||todayStr(),note:el("payNote").value||""};
-    const ok=await run(()=>apiAddPayment(p),"تم تسجيل الدفعة ✓"); if(!ok)return;
-    DB.payments.push(p); closeModal(); renderView();
+    const amt=toInt(el("payAmt").value);
+    if(amt<=0){ toast("أدخل مبلغ صحيح أكبر من صفر"); return; }
+    const date=el("payDate").value||todayStr(), note=el("payNote").value||"";
+    if(ex){
+      const upd={...ex,amount:amt,date,note};
+      const ok=await run(()=>apiUpdatePayment(upd),"تم حفظ التعديل ✓"); if(!ok)return;
+      audit("تعديل دفعة",pid,`${p.name} · ${fmt(ex.amount)} ← ${fmt(amt)} · ${dispDate(ex.date)}${ex.date!==date?" ← "+dispDate(date):""}${note?" · "+note:""}`);
+      Object.assign(ex,upd);
+    }else{
+      const np={id:uid(),personId:pid,amount:amt,date,note,ts:Date.now()};
+      const ok=await run(()=>apiAddPayment(np),"تم تسجيل الدفعة ✓"); if(!ok)return;
+      DB.payments.push(np);
+      audit("تسجيل دفعة",pid,`${p.name} · ${fmt(amt)} · ${dispDate(date)}${note?" · "+note:""}`);
+    }
+    closeModal(); renderView();
   };
+  if(ex) el("payDel").onclick=()=>confirmDo(`حذف دفعة ${money(ex.amount)} (${dispDate(ex.date)})؟ الرصيد يرجع كما كان قبلها.`,async()=>{
+    const ok=await run(()=>apiDeletePayment(ex.id),"تم حذف الدفعة"); if(!ok)return;
+    DB.payments=DB.payments.filter(x=>x.id!==ex.id);
+    audit("حذف دفعة",pid,`${p.name} · ${fmt(ex.amount)} · ${dispDate(ex.date)}${ex.note?" · "+ex.note:""}`);
+    renderView();
+  });
+}
+
+/* ---------- تسوية: خصم أو إضافة على الحساب ---------- */
+function adjModal(pid,editId){
+  if(!DB.schemaOk){ toast("شغّل أمر ترقية قاعدة البيانات أولاً (التنبيه الأصفر أعلى الصفحة)"); return; }
+  const p=person(pid); const ex=editId?DB.adjustments.find(x=>x.id===editId):null;
+  let disc=ex?ex.amount<0:true;
+  openModal((ex?"تعديل تسوية — ":"خصم / إضافة — ")+p.name,
+   `<div class="stack">
+     <div class="seg"><button type="button" id="adKD" class="${disc?"on":""}">خصم (ينقص من حسابه)</button><button type="button" id="adKC" class="${disc?"":"on"}">إضافة (تزيد عليه)</button></div>
+     <div><label class="fld">المبلغ</label><input class="input num" id="adAmt" inputmode="numeric" placeholder="0" value="${ex?Math.abs(ex.amount):""}"></div>
+     <div><label class="fld">التاريخ</label><input class="input" type="date" id="adDate" value="${ex?ex.date:todayStr()}"></div>
+     <div><label class="fld">السبب (يظهر بالكشف والسجل)</label><input class="input" id="adNote" value="${ex?esc(ex.note):""}" placeholder="مثال: خصم عن طلب اليوم / تصحيح خطأ"></div>
+     <button class="btn block" id="adSave">${ex?"حفظ التعديل":"حفظ"}</button>
+     ${ex?`<button class="btn danger block" id="adDel" type="button">حذف التسوية</button>`:""}
+   </div>`);
+  const sync=()=>{ el("adKD").classList.toggle("on",disc); el("adKC").classList.toggle("on",!disc); };
+  el("adKD").onclick=()=>{disc=true;sync();}; el("adKC").onclick=()=>{disc=false;sync();};
+  el("adSave").onclick=async()=>{
+    const a=Math.abs(toInt(el("adAmt").value));
+    if(a<=0){ toast("أدخل مبلغ صحيح"); return; }
+    const amount=disc?-a:a, date=el("adDate").value||todayStr(), note=(el("adNote").value||"").trim();
+    const kind=disc?"خصم":"إضافة";
+    if(ex){
+      const upd={...ex,amount,date,note};
+      const ok=await run(()=>apiUpdateAdj(upd),"تم حفظ التعديل ✓"); if(!ok)return;
+      audit("تعديل تسوية",pid,`${p.name} · ${fmt(ex.amount)} ← ${fmt(amount)} · ${dispDate(date)}${note?" · "+note:""}`);
+      Object.assign(ex,upd);
+    }else{
+      const na={id:uid(),personId:pid,amount,date,note,ts:Date.now()};
+      const ok=await run(()=>apiAddAdj(na),"تم ✓"); if(!ok)return;
+      DB.adjustments.push(na);
+      audit("تسوية "+kind,pid,`${p.name} · ${kind} ${fmt(a)} · ${dispDate(date)}${note?" · "+note:""}`);
+    }
+    closeModal(); renderView();
+  };
+  if(ex) el("adDel").onclick=()=>confirmDo(`حذف ${ex.amount<0?"الخصم":"الإضافة"} ${money(Math.abs(ex.amount))}؟`,async()=>{
+    const ok=await run(()=>apiDeleteAdj(ex.id),"تم الحذف"); if(!ok)return;
+    DB.adjustments=DB.adjustments.filter(x=>x.id!==ex.id);
+    audit("حذف تسوية",pid,`${p.name} · ${fmt(ex.amount)} · ${dispDate(ex.date)}${ex.note?" · "+ex.note:""}`);
+    renderView();
+  });
 }
 
 /* ============================================================
-   ADMIN — كشف حساب (date range statement, printable)
+   ADMIN — كشف حساب (فترة، صحيح: رصيد سابق → حركات → رصيد ختامي)
 ============================================================ */
 function viewReport(){
   hideBar();
   const v=el("view");
-  const monthStart=todayStr().slice(0,8)+"01";
+  const [ms,me]=monthRange(0);
   const opts=`<option value="__all">كل الأشخاص</option>`+DB.people.map(p=>`<option value="${p.id}" ${S._stmtPerson===p.id?'selected':''}>${esc(p.name)}</option>`).join("");
   v.innerHTML=`
    <div class="card card-p" style="margin-bottom:14px">
      <div class="section-title"><span class="k"></span>كشف حساب من تاريخ إلى تاريخ</div>
      <div class="row">
        <div><label class="fld">الشخص</label><select class="input" id="rpPerson">${opts}</select></div>
-       <div><label class="fld">من تاريخ</label><input class="input" type="date" id="rpFrom" value="${monthStart}"></div>
-       <div><label class="fld">إلى تاريخ</label><input class="input" type="date" id="rpTo" value="${todayStr()}"></div>
+       <div><label class="fld">من تاريخ</label><input class="input" type="date" id="rpFrom" value="${ms}"></div>
+       <div><label class="fld">إلى تاريخ</label><input class="input" type="date" id="rpTo" value="${me}"></div>
+     </div>
+     <div class="chips" style="margin-top:12px">
+       <button class="chip" id="rpM0">هذا الشهر</button>
+       <button class="chip" id="rpM1">الشهر السابق</button>
+       <button class="chip" id="rpAll">كل الفترة</button>
      </div>
      <div class="row" style="margin-top:12px">
        <button class="btn sm" id="rpRun">عرض</button>
-       <button class="btn dark sm" id="rpPrint">طباعة الكشف</button>
+       <button class="btn dark sm" id="rpPrint">طباعة</button>
+       <button class="btn dark sm" id="rpPrintAll">طباعة كشف لكل شخص</button>
      </div>
    </div>
    <div id="rpOut"></div>`;
+  const setRange=(a,b)=>{ el("rpFrom").value=a; el("rpTo").value=b; runReport(); };
+  el("rpM0").onclick=()=>setRange(...monthRange(0));
+  el("rpM1").onclick=()=>setRange(...monthRange(-1));
+  el("rpAll").onclick=()=>setRange("","");
   el("rpRun").onclick=runReport;
   el("rpPrint").onclick=printReport;
+  el("rpPrintAll").onclick=printEachReport;
+  el("rpPerson").onchange=runReport;
   runReport();
 }
 function reportData(){
   const pid=el("rpPerson").value, from=el("rpFrom").value, to=el("rpTo").value;
   const people = pid==="__all"? DB.people : DB.people.filter(p=>p.id===pid);
-  const rows=people.map(p=>{
-    const ords=personOrders(p.id,from,to);
-    const pays=personPayments(p.id,from,to);
-    const ot=ords.reduce((s,o)=>s+orderTotal(o),0);
-    const pt=pays.reduce((s,x)=>s+x.amount,0);
-    return {p,ords,pays,ot,pt,bal:balance(p.id)};
-  });
+  const rows=people.map(p=>({p,st:statement(p.id,from,to),bal:balance(p.id)}));
   return {pid,from,to,rows};
 }
+function periodTitle(from,to){ return (from?dispDate(from):"من البداية")+" — "+(to?dispDate(to):"حتى اليوم"); }
 function runReport(){
   const {pid,from,to,rows}=reportData();
   const out=el("rpOut");
   if(pid!=="__all"){
-    const r=rows[0];
+    const r=rows[0], st=r.st;
     out.innerHTML=`
      <div class="card card-p" style="margin-bottom:14px">
-       <div class="section-title"><span class="k"></span>${esc(r.p.name)} · ${dispDate(from)} — ${dispDate(to)}</div>
-       <table class="tbl"><thead><tr><th>التاريخ</th><th>التفاصيل</th><th class="num">المبلغ</th></tr></thead>
-       <tbody>${r.ords.sort((a,b)=>a.date.localeCompare(b.date)).map(o=>`
-         <tr><td class="num">${dispDate(o.date)}</td>
-             <td>${(o.items||[]).map(i=>esc(i.name)+(i.qty>1?" ×"+i.qty:"")).join("، ")||"—"}${o.manual?` + يدوي`:""}</td>
-             <td class="num">${money(orderTotal(o))}</td></tr>`).join("")||`<tr><td colspan="3" class="muted">لا طلبات بالمدة</td></tr>`}
-       </tbody>
-       <tfoot><tr><td colspan="2">إجمالي الطلبات بالمدة</td><td class="num">${money(r.ot)}</td></tr></tfoot></table>
-       <div class="row" style="margin-top:14px">
-         <div class="card card-p" style="box-shadow:none;background:var(--green-soft)"><div class="muted" style="font-size:12px">مدفوع بالمدة</div><div class="num clear" style="font-weight:800;font-size:18px">${money(r.pt)}</div></div>
-         <div class="card card-p" style="box-shadow:none;background:${r.bal>0?'var(--red-soft)':'var(--green-soft)'}"><div class="muted" style="font-size:12px">المتبقي الكلي (لليوم)</div><div class="num ${r.bal>0?'owed':'clear'}" style="font-weight:800;font-size:18px">${money(r.bal)}</div></div>
-       </div>
+       <div class="section-title"><span class="k"></span>${esc(r.p.name)} · ${periodTitle(from,to)}</div>
+       ${summaryCells(st)}
+       <div style="height:8px"></div>
+       ${st.prev?ledgerRows([{kind:"prev",label:"رصيد سابق",amount:st.prev,run:st.prev,date:""}],false):""}
+       ${ledgerRows(st.entries,false)||`<div class="empty">لا حركات بهذه الفترة</div>`}
+       ${r.bal!==st.closing?`<p class="muted" style="margin:12px 0 0;font-size:13px">الرصيد الحالي (كل الأيام): <b class="num ${r.bal>0?"owed":"clear"}">${money(r.bal)}</b></p>`:""}
      </div>`;
   }else{
-    const gOt=rows.reduce((s,r)=>s+r.ot,0), gPt=rows.reduce((s,r)=>s+r.pt,0), gBal=rows.reduce((s,r)=>s+Math.max(0,r.bal),0);
+    const t=k=>rows.reduce((s,r)=>s+r.st[k],0);
+    const gClose=rows.reduce((s,r)=>s+r.st.closing,0);
     out.innerHTML=`
-     <div class="card card-p">
-       <div class="section-title"><span class="k"></span>ملخّص الكل · ${dispDate(from)} — ${dispDate(to)}</div>
-       <table class="tbl"><thead><tr><th>الشخص</th><th class="num">طلبات المدة</th><th class="num">مدفوع المدة</th><th class="num">المتبقي الكلي</th></tr></thead>
-       <tbody>${rows.map(r=>`<tr><td>${esc(r.p.name)}</td><td class="num">${money(r.ot)}</td><td class="num clear">${money(r.pt)}</td><td class="num ${r.bal>0?'owed':'clear'}">${money(r.bal)}</td></tr>`).join("")}</tbody>
-       <tfoot><tr><td>المجموع</td><td class="num">${money(gOt)}</td><td class="num">${money(gPt)}</td><td class="num owed">${money(gBal)}</td></tr></tfoot></table>
+     <div class="card card-p" style="overflow-x:auto">
+       <div class="section-title"><span class="k"></span>ملخّص الكل · ${periodTitle(from,to)}</div>
+       <table class="tbl"><thead><tr><th>الشخص</th><th class="num">سابق</th><th class="num">طلبات</th><th class="num">تسويات</th><th class="num">مدفوع</th><th class="num">الرصيد</th></tr></thead>
+       <tbody>${rows.map(r=>`<tr><td>${esc(r.p.name)}</td><td class="num">${fmt(r.st.prev)}</td><td class="num">${fmt(r.st.orders)}</td><td class="num">${fmt(r.st.adj)}</td><td class="num clear">${fmt(r.st.pay)}</td><td class="num ${r.st.closing>0?'owed':'clear'}" style="font-weight:800">${fmt(r.st.closing)}</td></tr>`).join("")}</tbody>
+       <tfoot><tr><td>المجموع</td><td class="num">${fmt(t("prev"))}</td><td class="num">${fmt(t("orders"))}</td><td class="num">${fmt(t("adj"))}</td><td class="num">${fmt(t("pay"))}</td><td class="num">${fmt(gClose)}</td></tr></tfoot></table>
      </div>`;
   }
+}
+
+/* ---------- الطباعة ---------- */
+function personReceipt(p,from,to){
+  const st=statement(p.id,from,to);
+  const body=(st.prev?`<tr><td></td><td>رصيد سابق</td><td class="num">${fmt(st.prev)}</td><td class="num">${fmt(st.prev)}</td></tr>`:"")
+    +st.entries.map(e=>`<tr><td>${dispDate(e.date)}</td><td>${entryLabel(e)}</td><td class="num">${e.amount<0?"−":"+"}${fmt(Math.abs(e.amount))}</td><td class="num">${fmt(e.run)}</td></tr>`).join("");
+  return `<div class="receipt">
+    <div class="r-head"><div class="r-b">سفرة</div><div class="r-meta">كشف حساب — ${esc(p.name)}</div>
+      <div class="r-meta">${periodTitle(from,to)}</div></div>
+    <table><thead><tr><th>التاريخ</th><th>التفاصيل</th><th class="num">المبلغ</th><th class="num">الرصيد</th></tr></thead><tbody>
+      ${body||`<tr><td colspan="4" style="text-align:center;color:#888">لا حركات بهذه الفترة</td></tr>`}
+    </tbody></table>
+    <div class="r-tot">
+      <div class="line"><span>رصيد سابق</span><span class="num">${fmt(st.prev)}</span></div>
+      <div class="line"><span>طلبات الفترة</span><span class="num">${fmt(st.orders)}</span></div>
+      ${st.adj?`<div class="line"><span>تسويات (خصم/إضافة)</span><span class="num">${fmt(st.adj)}</span></div>`:""}
+      <div class="line"><span>المدفوع</span><span class="num">${fmt(st.pay)}</span></div>
+      <div class="line big"><span>${st.closing<0?"رصيد له":"المتبقي عليه"}</span><span class="num">${money(Math.abs(st.closing))}</span></div>
+    </div>
+    <div class="r-foot">شكراً — سفرة</div></div>`;
 }
 function printReport(){
   const {pid,from,to,rows}=reportData();
   let html;
-  if(pid!=="__all"){
-    const r=rows[0];
-    html=`<div class="receipt">
-      <div class="r-head"><div class="r-b">سفرة</div><div class="r-meta">كشف حساب — ${esc(r.p.name)}</div>
-        <div class="r-meta">من ${dispDate(from)} إلى ${dispDate(to)}</div></div>
-      <table><thead><tr><th>التاريخ</th><th>التفاصيل</th><th class="num">المبلغ</th></tr></thead><tbody>
-        ${r.ords.sort((a,b)=>a.date.localeCompare(b.date)).map(o=>`<tr><td>${dispDate(o.date)}</td><td>${(o.items||[]).map(i=>esc(i.name)+(i.qty>1?" ×"+i.qty:"")).join("، ")||"يدوي"}</td><td class="num">${money(orderTotal(o))}</td></tr>`).join("")}
-      </tbody></table>
-      <div class="r-tot">
-        <div class="line"><span>إجمالي الطلبات بالمدة</span><span class="num">${money(r.ot)}</span></div>
-        <div class="line"><span>المدفوع بالمدة</span><span class="num">${money(r.pt)}</span></div>
-        <div class="line big"><span>المتبقي عليه (لليوم)</span><span class="num">${money(r.bal)}</span></div>
-      </div>
-      <div class="r-foot">شكراً — سفرة</div></div>`;
-  }else{
-    const gBal=rows.reduce((s,r)=>s+Math.max(0,r.bal),0);
+  if(pid!=="__all") html=personReceipt(rows[0].p,from,to);
+  else{
+    const gClose=rows.reduce((s,r)=>s+r.st.closing,0);
     html=`<div class="receipt">
       <div class="r-head"><div class="r-b">سفرة</div><div class="r-meta">كشف حساب عام</div>
-        <div class="r-meta">من ${dispDate(from)} إلى ${dispDate(to)}</div></div>
-      <table><thead><tr><th>الشخص</th><th class="num">طلبات</th><th class="num">مدفوع</th><th class="num">متبقي</th></tr></thead><tbody>
-        ${rows.map(r=>`<tr><td>${esc(r.p.name)}</td><td class="num">${money(r.ot)}</td><td class="num">${money(r.pt)}</td><td class="num">${money(r.bal)}</td></tr>`).join("")}
+        <div class="r-meta">${periodTitle(from,to)}</div></div>
+      <table><thead><tr><th>الشخص</th><th class="num">طلبات</th><th class="num">مدفوع</th><th class="num">الرصيد</th></tr></thead><tbody>
+        ${rows.map(r=>`<tr><td>${esc(r.p.name)}</td><td class="num">${fmt(r.st.orders+r.st.adj)}</td><td class="num">${fmt(r.st.pay)}</td><td class="num">${fmt(r.st.closing)}</td></tr>`).join("")}
       </tbody></table>
-      <div class="r-tot"><div class="line big"><span>مجموع المتبقي</span><span class="num">${money(gBal)}</span></div></div>
+      <div class="r-tot"><div class="line big"><span>مجموع الأرصدة</span><span class="num">${money(gClose)}</span></div></div>
       <div class="r-foot">سفرة</div></div>`;
   }
-  el("printRoot").innerHTML=html;
-  window.print();
+  el("printRoot").innerHTML=html; window.print();
+}
+function printEachReport(){
+  const from=el("rpFrom").value, to=el("rpTo").value;
+  const people=DB.people.filter(p=>{ const s=statement(p.id,from,to); return s.prev||s.entries.length; });
+  if(!people.length){ toast("لا توجد حركات بهذه الفترة"); return; }
+  el("printRoot").innerHTML=people.map(p=>personReceipt(p,from,to)).join(""); window.print();
 }
 
+
 /* ============================================================
-   ADMIN — المنيو
+   ADMIN — المنيو (مجمّع حسب الصنف)
 ============================================================ */
 function viewMenu(){
   hideBar();
   const v=el("view");
+  const cats=menuCategories();
   v.innerHTML=`
    <div class="card card-p" style="margin-bottom:14px;display:flex;align-items:center;gap:10px">
-     <div class="section-title" style="margin:0;flex:1"><span class="k"></span>المنيو (${DB.menu.length} وجبة)</div>
+     <div class="section-title" style="margin:0;flex:1"><span class="k"></span>المنيو (${DB.menu.length} وجبة · ${cats.length} صنف)</div>
      <button class="btn sm" id="addItem">＋ وجبة</button>
    </div>
-   <div class="card"><table class="tbl">
-     <thead><tr><th style="width:44px">#</th><th>الاسم</th><th class="num">السعر</th><th style="width:120px"></th></tr></thead>
-     <tbody>${DB.menu.map(m=>`<tr>
-       <td class="num muted">${m.num}</td><td style="font-weight:600">${esc(m.name)}</td>
+   ${cats.map(c=>`<div class="card" style="margin-bottom:14px;overflow:hidden"><div class="cathead" style="margin:0;padding:12px 14px;background:var(--paper)">${esc(c)}</div>
+     <table class="tbl"><tbody>${DB.menu.filter(m=>itemCat(m)===c).map(m=>`<tr>
+       <td style="font-weight:600">${esc(m.name)}</td>
        <td class="num" style="font-weight:700">${money(m.price)}</td>
-       <td><div style="display:flex;gap:6px"><button class="btn line sm" data-editm="${m.id}">تعديل</button>
-         <button class="btn danger sm" data-delm="${m.id}">حذف</button></div></td></tr>`).join("")}
-     </tbody></table></div>`;
+       <td style="width:130px"><div style="display:flex;gap:6px"><button class="btn line sm" data-editm="${m.id}">تعديل</button>
+         <button class="btn danger sm" data-delm="${m.id}">حذف</button></div></td></tr>`).join("")}</tbody></table></div>`).join("")}
+   ${DB.menu.length?"":`<div class="empty">المنيو فارغ</div>`}`;
   el("addItem").onclick=()=>menuModal();
   document.querySelectorAll("[data-editm]").forEach(b=>b.onclick=()=>menuModal(b.dataset.editm));
-  document.querySelectorAll("[data-delm]").forEach(b=>b.onclick=()=>confirmDo("حذف هذه الوجبة من المنيو؟",async()=>{
-    const id=b.dataset.delm; const ok=await run(()=>apiDeleteMenu(id),"تم الحذف"); if(!ok)return;
-    DB.menu=DB.menu.filter(m=>m.id!==id); viewMenu();
-  }));
+  document.querySelectorAll("[data-delm]").forEach(b=>b.onclick=()=>{
+    const m=DB.menu.find(x=>x.id===b.dataset.delm);
+    confirmDo("حذف «"+m.name+"» من المنيو؟ (الطلبات القديمة تبقى كما هي)",async()=>{
+      const ok=await run(()=>apiDeleteMenu(m.id),"تم الحذف"); if(!ok)return;
+      DB.menu=DB.menu.filter(x=>x.id!==m.id);
+      audit("حذف وجبة",null,m.name+" · "+fmt(m.price));
+      viewMenu();
+    });
+  });
 }
 function menuModal(id){
   const m = id? DB.menu.find(x=>x.id===id) : null;
+  const cats=menuCategories().filter(c=>c!==NO_CAT);
   openModal(m?"تعديل وجبة":"إضافة وجبة",
    `<div class="stack">
      <div><label class="fld">اسم الوجبة</label><input class="input" id="miName" value="${m?esc(m.name):""}" placeholder="مثال: تمن ومرق"></div>
      <div><label class="fld">السعر (د.ع)</label><input class="input num" id="miPrice" inputmode="numeric" value="${m?m.price:""}" placeholder="0"></div>
+     <div><label class="fld">الصنف</label><input class="input" id="miCat" list="miCats" value="${m?esc(m.category||""):""}" placeholder="اختر أو اكتب صنف جديد">
+       <datalist id="miCats">${cats.map(c=>`<option value="${esc(c)}">`).join("")}</datalist>
+       ${DB.schemaOk?"":`<div class="muted" style="font-size:12px;margin-top:6px">⚠️ الأصناف تحتاج تشغيل أمر الترقية أولاً</div>`}</div>
      <button class="btn block" id="miSave">${m?"حفظ التعديل":"إضافة"}</button>
    </div>`);
   el("miSave").onclick=async()=>{
-    const name=(el("miName").value||"").trim(); const price=parseInt(el("miPrice").value||"0",10)||0;
+    const name=(el("miName").value||"").trim(); const price=toInt(el("miPrice").value);
+    const category=(el("miCat").value||"").trim();
     if(!name){ toast("اكتب الاسم"); return; }
-    if(m){ const upd={...m,name,price}; const ok=await run(()=>apiUpdateMenu(upd),"تم ✓"); if(!ok)return; Object.assign(m,upd); }
-    else{ const num=(DB.menu.reduce((mx,x)=>Math.max(mx,x.num||0),0)||0)+1; const nm={id:uid(),num,name,price};
-      const ok=await run(()=>apiAddMenu(nm),"تم ✓"); if(!ok)return; DB.menu.push(nm); }
+    if(price<=0){ toast("اكتب سعر صحيح"); return; }
+    if(m){ const upd={...m,name,price,category}; const ok=await run(()=>apiUpdateMenu(upd),"تم ✓"); if(!ok)return;
+      audit("تعديل وجبة",null,`${m.name} ← ${name} · ${fmt(m.price)} ← ${fmt(price)}${m.category!==category?" · الصنف: "+(category||"—"):""}`);
+      Object.assign(m,upd); }
+    else{ const num=(DB.menu.reduce((mx,x)=>Math.max(mx,x.num||0),0)||0)+1; const nm={id:uid(),num,name,price,category};
+      const ok=await run(()=>apiAddMenu(nm),"تم ✓"); if(!ok)return; DB.menu.push(nm);
+      audit("إضافة وجبة",null,`${name} · ${fmt(price)}${category?" · "+category:""}`); }
     closeModal(); viewMenu();
   };
 }
@@ -996,22 +1478,34 @@ function viewPeople(){
    <div class="plist">${DB.people.map(p=>`
      <div class="prow">
        <div class="av">${esc(initials(p.name))}</div>
-       <div style="flex:1"><div class="nm">${esc(p.name)}</div>
-         <div class="sub">${p.pin?"🔒 له رمز":"بدون رمز"} · ${personOrders(p.id).length} طلب</div></div>
+       <div style="flex:1;min-width:0"><div class="nm">${esc(p.name)}</div>
+         <div class="sub">${p.pin?"🔒 له رمز":"بدون رمز"} · ${personOrders(p.id).length} طلب${p.opening?" · رصيد سابق "+fmt(p.opening):""}</div></div>
        <button class="btn line sm" data-editp="${p.id}">تعديل</button>
        <button class="btn danger sm" data-delp="${p.id}">حذف</button>
      </div>`).join("")}</div>`;
   el("addP").onclick=()=>personModal();
   document.querySelectorAll("[data-editp]").forEach(b=>b.onclick=()=>personModal(b.dataset.editp));
   document.querySelectorAll("[data-delp]").forEach(b=>b.onclick=()=>{
-    const p=person(b.dataset.delp); const has=personOrders(p.id).length||personPayments(p.id).length;
-    confirmDo(has?`«${p.name}» عنده حركات محفوظة. حذفه راح يشيل بياناته. متأكد؟`:`حذف «${p.name}»؟`,async()=>{
-      const ok=await run(()=>apiDeletePerson(p.id),"تم الحذف"); if(!ok)return;
+    const p=person(b.dataset.delp);
+    const n1=personOrders(p.id).length, n2=personPayments(p.id).length, bal=balance(p.id);
+    const has=n1||n2||p.opening;
+    const doDelete=async()=>{
+      const ok=await run(async()=>{
+        // نحذف حركات الشخص صراحة (لا نعتمد على cascade) ثم الشخص
+        const a=await sb.from('orders').delete().eq('person_id',p.id); if(a.error)throw a.error;
+        const b2=await sb.from('payments').delete().eq('person_id',p.id); if(b2.error)throw b2.error;
+        if(DB.schemaOk){ const c=await sb.from('adjustments').delete().eq('person_id',p.id); if(c.error)throw c.error; }
+        await apiDeletePerson(p.id);
+      },"تم الحذف"); if(!ok)return;
       DB.people=DB.people.filter(x=>x.id!==p.id);
       DB.orders=DB.orders.filter(o=>o.personId!==p.id);
       DB.payments=DB.payments.filter(x=>x.personId!==p.id);
+      DB.adjustments=(DB.adjustments||[]).filter(x=>x.personId!==p.id);
+      audit("حذف شخص",null,`${p.name} · ${n1} طلب · ${n2} دفعة · رصيده وقت الحذف ${fmt(bal)}`);
       viewPeople();
-    });
+    };
+    if(has) confirmType(`«${p.name}» عنده ${n1} طلب و${n2} دفعة (رصيده ${money(bal)}). الحذف يمسح كل حركاته نهائياً.`,p.name,doDelete);
+    else confirmDo(`حذف «${p.name}»؟`,doDelete);
   });
 }
 function personModal(id){
@@ -1020,16 +1514,52 @@ function personModal(id){
    `<div class="stack">
      <div><label class="fld">الاسم</label><input class="input" id="pName" value="${p?esc(p.name):""}" placeholder="اسم الشخص"></div>
      <div><label class="fld">الرمز السري (اختياري)</label><input class="input" id="pPin" inputmode="numeric" maxlength="6" value="${p?esc(p.pin):""}" placeholder="اتركه فارغ للدخول بدون رمز"></div>
+     <div><label class="fld">رصيد سابق (قبل استخدام النظام)</label><input class="input num" id="pOpen" inputmode="numeric" value="${p&&p.opening?p.opening:""}" placeholder="0">
+       <div class="muted" style="font-size:12px;margin-top:6px">${DB.schemaOk?"موجب = عليه · سالب = له. يدخل بحسابه وكشفه.":"⚠️ يحتاج تشغيل أمر الترقية أولاً"}</div></div>
      <button class="btn block" id="pSave">${p?"حفظ":"إضافة"}</button>
    </div>`);
   el("pSave").onclick=async()=>{
     const name=(el("pName").value||"").trim(); const pin=(el("pPin").value||"").trim();
+    const opening=DB.schemaOk?toInt(el("pOpen").value):(p?p.opening||0:0);
     if(!name){ toast("اكتب الاسم"); return; }
-    if(p){ const upd={...p,name,pin}; const ok=await run(()=>apiUpdatePerson(upd),"تم ✓"); if(!ok)return; Object.assign(p,upd); }
-    else{ const np={id:uid(),name,pin}; const ok=await run(()=>apiAddPerson(np),"تم ✓"); if(!ok)return; DB.people.push(np); }
+    if(DB.people.some(x=>x.name===name && (!p||x.id!==p.id))){ toast("يوجد شخص بنفس الاسم"); return; }
+    if(p){ const upd={...p,name,pin,opening}; const ok=await run(()=>apiUpdatePerson(upd),"تم ✓"); if(!ok)return;
+      const ch=[]; if(p.name!==name)ch.push(`الاسم: ${p.name} ← ${name}`); if(p.pin!==pin)ch.push("تغيير الرمز"); if((p.opening||0)!==opening)ch.push(`رصيد سابق: ${fmt(p.opening||0)} ← ${fmt(opening)}`);
+      if(ch.length) audit("تعديل شخص",p.id,name+" · "+ch.join(" · "));
+      Object.assign(p,upd); }
+    else{ const np={id:uid(),name,pin,opening}; const ok=await run(()=>apiAddPerson(np),"تم ✓"); if(!ok)return; DB.people.push(np);
+      audit("إضافة شخص",np.id,name+(opening?" · رصيد سابق "+fmt(opening):"")); }
     closeModal();
-    if(S.view==="order") viewOrder(); else if(S.view==="people") viewPeople(); else renderView();
+    if(S.view==="order") viewOrder(true); else renderView();
   };
+}
+
+/* تأكيد بالكتابة (للعمليات الخطيرة) */
+function confirmType(msg,word,onYes){
+  openModal("تأكيد",
+   `<div class="stack"><p style="margin:0;line-height:1.9;color:var(--red);font-weight:700">${esc(msg)}</p>
+     <div><label class="fld">للتأكيد اكتب: <b>${esc(word)}</b></label><input class="input" id="cfWord" autocomplete="off"></div>
+     <button class="btn danger block" id="cfGo">نعم، احذف نهائياً</button>
+     <button class="btn line block" data-close>إلغاء</button></div>`);
+  el("cfGo").onclick=()=>{ if((el("cfWord").value||"").trim()!==word){ toast("الكلمة غير مطابقة"); return; } closeModal(); onYes(); };
+}
+
+/* ============================================================
+   ADMIN — السجل (كل تعديل مالي مسجّل)
+============================================================ */
+function viewAudit(){
+  hideBar();
+  const v=el("view");
+  const list=DB.audit||[];
+  v.innerHTML=`
+   <div class="card card-p">
+     <div class="section-title"><span class="k"></span>سجل التغييرات (آخر ${list.length})</div>
+     ${DB.schemaOk?"":`<div class="empty">السجل يحتاج تشغيل أمر الترقية أولاً</div>`}
+     ${list.length? list.map(a=>`<div class="lrow"><div class="lmain">
+        <div class="lt1"><span class="ktag k-open">${esc(a.action)}</span>${esc(a.details)}</div>
+        <div class="lt2">${fmtTime(a.ts)} · بواسطة ${esc(a.actor)}</div></div></div>`).join("")
+       : (DB.schemaOk?`<div class="empty">لا توجد تغييرات مسجّلة بعد</div>`:"")}
+   </div>`;
 }
 
 /* ============================================================
@@ -1039,6 +1569,13 @@ function viewSettings(){
   hideBar();
   const v=el("view");
   v.innerHTML=`
+   <div class="card card-p" style="margin-bottom:14px">
+     <div class="section-title"><span class="k"></span>وقت الإغلاق التلقائي</div>
+     <p class="muted" style="font-size:13px;margin:0 0 12px;line-height:1.8">الموظف يقدر يضيف ويعدّل ويحذف طلبه حتى هذا الوقت من نفس اليوم، وبعده يقفل تلقائياً. اتركه فارغ إذا تريد القفل يدوي فقط (زر «قفل الطلب» بطلبات اليوم).</p>
+     <div class="row"><div><label class="fld">الساعة (24 ساعة)</label><input class="input" type="time" id="cutoff" value="${esc(cutoffTime())}"></div></div>
+     <button class="btn sm" id="saveCut" style="margin-top:12px">حفظ</button>
+   </div>
+
    <div class="card card-p" style="margin-bottom:14px">
      <div class="section-title"><span class="k"></span>رمز الإدارة</div>
      <div class="row">
@@ -1055,30 +1592,51 @@ function viewSettings(){
 
    <div class="card card-p">
      <div class="section-title"><span class="k"></span>البيانات</div>
-     <p class="muted" style="font-size:13px;margin:0 0 12px">تصدير نسخة احتياطية أو تصفير كامل.</p>
+     <p class="muted" style="font-size:13px;margin:0 0 12px">صدّر نسخة احتياطية بشكل دوري. التصفير الكامل يحتاج كتابة كلمة تأكيد.</p>
      <div class="row">
        <button class="btn line sm" id="exp">تصدير نسخة (JSON)</button>
        <button class="btn danger sm" id="reset">تصفير كل البيانات</button>
      </div>
    </div>`;
+  el("saveCut").onclick=async()=>{
+    const t=el("cutoff").value||"";
+    if(t) DB.locks._cutoff=t; else delete DB.locks._cutoff;
+    await run(()=>apiSaveSettings(),t?"تم — الإغلاق التلقائي "+t:"تم إلغاء الإغلاق التلقائي");
+    audit("وقت الإغلاق",null,t||"بدون");
+  };
   el("saveAdm").onclick=async()=>{ const n=(el("newAdm").value||"").trim(); if(n.length<3){toast("رمز قصير");return;}
-    DB.admin.pin=n; await run(()=>apiSaveSettings(),"تم تغيير الرمز ✓"); };
+    DB.admin.pin=n; await run(()=>apiSaveSettings(),"تم تغيير الرمز ✓"); audit("تغيير رمز الإدارة",null,""); };
   el("adminOrder").onclick=()=>{ S.view="order"; S._forPerson=null; renderApp(); };
   el("exp").onclick=()=>{
     const blob=new Blob([JSON.stringify(DB,null,2)],{type:"application/json"});
     const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
     a.download="sufra-backup-"+todayStr()+".json"; a.click(); toast("تم التصدير");
   };
-  el("reset").onclick=()=>confirmDo("راح ينمسح كل الطلبات والدفعات (الأشخاص والمنيو يبقون). متأكد؟",async()=>{
+  el("reset").onclick=()=>confirmType("راح ينمسح كل الطلبات والدفعات والتسويات (الأشخاص والمنيو يبقون).","تصفير",async()=>{
     const ok=await run(async()=>{
       const a=await sb.from('orders').delete().neq('id','__none__');
       const b=await sb.from('payments').delete().neq('id','__none__');
       if(a.error) throw a.error; if(b.error) throw b.error;
-      DB.locks={}; await apiSaveSettings();
+      if(DB.schemaOk){ const c=await sb.from('adjustments').delete().neq('id','__none__'); if(c.error) throw c.error; }
+      const cut=DB.locks._cutoff; DB.locks={}; if(cut) DB.locks._cutoff=cut; await apiSaveSettings();
     },"تم التصفير"); if(!ok)return;
-    DB.orders=[]; DB.payments=[]; DB.locks={}; S.view="today"; renderApp();
+    DB.orders=[]; DB.payments=[]; DB.adjustments=[];
+    audit("تصفير كل البيانات",null,"");
+    S.view="today"; renderApp();
   });
 }
+
+/* تنبيه الترقية (يظهر للإدارة فقط إذا لم يُشغَّل ملف SQL) */
+function upgradeBannerHTML(){
+  if(DB.schemaOk) return "";
+  return `<div class="banner">⚠️ ميزات الإدارة المالية الكاملة (التسويات، الرصيد السابق، الأصناف، السجل) تحتاج ترقية قاعدة البيانات مرة وحدة.
+    <button class="btn sm" id="copyUp" style="margin-inline-start:8px">نسخ أمر الترقية</button>
+    <div style="font-size:12px;margin-top:6px;font-weight:500">الصقه في Supabase ← SQL Editor ← Run، ثم اضغط ↻ تحديث.</div></div>`;
+}
+function bindUpgradeBanner(){ const b=el("copyUp"); if(b) b.onclick=()=>{
+  if(navigator.clipboard) navigator.clipboard.writeText(UPGRADE_SQL).then(()=>toast("تم نسخ الأمر ✓")); }; }
+
+
 /* admin order screen reachable via view=order */
 function _adminOrderView(){ viewOrder(true); }
 
